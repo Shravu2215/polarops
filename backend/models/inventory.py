@@ -15,3 +15,4 @@ class InventoryItem(Base):
     location_station = Column(String, nullable=False)  # Maitri, Bharati
     cold_factor_sensitivity = Column(Float, default=1.0)  # Multiplier sensitivity for colder temps
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    last_client_timestamp = Column(String, nullable=True)

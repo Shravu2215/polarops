@@ -1,4 +1,5 @@
-from fastapi import FastAPI, Depends, HTTPException, status
+from fastapi import FastAPI, Depends, HTTPException, status, Request, Response, Header
+from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
@@ -7,6 +8,7 @@ from typing import Optional, List, Any
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone, timedelta
 import math
+import json
 import numpy as np
 
 from database import engine, get_db, Base
@@ -30,6 +32,43 @@ def haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     a = math.sin(dlat / 2.0)**2 + math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) * math.sin(dlon / 2.0)**2
     c = 2.0 * math.atan2(math.sqrt(a), math.sqrt(1.0 - a))
     return round(r * c, 2)
+def extract_timestamps(request: Request, client_ts_param: Optional[str] = None):
+    now_iso = datetime.now(timezone.utc).isoformat()
+    client_ts = (
+        request.headers.get("Client-Timestamp") or 
+        request.headers.get("X-Client-Timestamp") or 
+        client_ts_param or 
+        now_iso
+    )
+    return client_ts, now_iso
+
+def check_idempotency(request: Request, db: Session):
+    idem_key = request.headers.get("Idempotency-Key") or request.headers.get("X-Idempotency-Key")
+    if idem_key:
+        record = db.query(models.IdempotencyRecord).filter(models.IdempotencyRecord.key == idem_key).first()
+        if record:
+            try:
+                body = json.loads(record.response_body)
+            except Exception:
+                body = record.response_body
+            return JSONResponse(status_code=record.response_status, content=body)
+    return None
+
+def save_idempotency(request: Request, response_status: int, response_body: Any, db: Session):
+    idem_key = request.headers.get("Idempotency-Key") or request.headers.get("X-Idempotency-Key")
+    if idem_key:
+        existing = db.query(models.IdempotencyRecord).filter(models.IdempotencyRecord.key == idem_key).first()
+        if not existing:
+            body_str = json.dumps(response_body) if isinstance(response_body, (dict, list)) else str(response_body)
+            record = models.IdempotencyRecord(
+                key=idem_key,
+                endpoint=request.url.path,
+                response_status=response_status,
+                response_body=body_str,
+                created_at=datetime.now(timezone.utc)
+            )
+            db.add(record)
+            db.commit()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -83,6 +122,7 @@ class CreateExpeditionRequest(BaseModel):
     end_date: str
     target_team_size: int
     status: Optional[str] = "Active"
+    client_timestamp: Optional[str] = None
 
 class CreateInventoryItemRequest(BaseModel):
     name: str
@@ -93,6 +133,18 @@ class CreateInventoryItemRequest(BaseModel):
     daily_use_per_person: float
     location_station: str
     cold_factor_sensitivity: Optional[float] = 1.0
+    client_timestamp: Optional[str] = None
+
+class UpdateInventoryItemRequest(BaseModel):
+    name: Optional[str] = None
+    category: Optional[str] = None
+    quantity: Optional[float] = None
+    unit: Optional[str] = None
+    min_required: Optional[float] = None
+    daily_use_per_person: Optional[float] = None
+    location_station: Optional[str] = None
+    cold_factor_sensitivity: Optional[float] = None
+    client_timestamp: Optional[str] = None
 
 class CreateCargoRequest(BaseModel):
     shipment_code: str
@@ -102,6 +154,11 @@ class CreateCargoRequest(BaseModel):
     priority: str  # Critical, High, Medium, Low
     status: Optional[str] = "Pending"
     expedition_id: Optional[int] = None
+    client_timestamp: Optional[str] = None
+
+class UpdateCargoStatusRequest(BaseModel):
+    status: str
+    client_timestamp: Optional[str] = None
 
 class CreateVehicleRequest(BaseModel):
     name: str
@@ -111,11 +168,13 @@ class CreateVehicleRequest(BaseModel):
     weather_limit: str
     station_name: str
     status: Optional[str] = "Available"
+    client_timestamp: Optional[str] = None
 
 class SOSRequest(BaseModel):
     skill_needed: str
     latitude: float
     longitude: float
+    client_timestamp: Optional[str] = None
 
 # --- Root & Health Routes ---
 @app.get("/")
@@ -456,9 +515,16 @@ def update_user_profile(
 @app.post("/expeditions")
 def create_expedition(
     req: CreateExpeditionRequest,
+    request: Request,
     current_user: models.User = Depends(require_write_role),
     db: Session = Depends(get_db)
 ):
+    cached = check_idempotency(request, db)
+    if cached:
+        return cached
+
+    client_ts, received_at = extract_timestamps(request, req.client_timestamp)
+
     if req.status == "Active":
         db.query(models.Expedition).filter(models.Expedition.status == "Active").update({"status": "Completed"})
 
@@ -481,7 +547,13 @@ def create_expedition(
     last_log = db.query(AuditLog).order_by(AuditLog.id.desc()).first()
     prev_hash = last_log.hash if last_log else ("0" * 64)
     now_dt = datetime.now(timezone.utc)
-    payload = {"expedition_id": exp.id, "name": exp.name, "target_team_size": exp.target_team_size}
+    payload = {
+        "expedition_id": exp.id,
+        "name": exp.name,
+        "target_team_size": exp.target_team_size,
+        "client_timestamp": client_ts,
+        "received_at": received_at
+    }
     new_hash = AuditLog.compute_hash("EXPEDITION_CREATED", current_user.username, f"EXPEDITION-{exp.id}", payload, now_dt, prev_hash)
 
     audit = AuditLog(
@@ -496,7 +568,7 @@ def create_expedition(
     db.add(audit)
     db.commit()
 
-    return {
+    res = {
         "id": exp.id,
         "name": exp.name,
         "station_name": exp.station_name,
@@ -505,6 +577,8 @@ def create_expedition(
         "target_team_size": exp.target_team_size,
         "status": exp.status
     }
+    save_idempotency(request, 200, res, db)
+    return res
 
 @app.get("/expeditions")
 def get_expeditions(current_user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
@@ -514,9 +588,16 @@ def get_expeditions(current_user: models.User = Depends(get_current_user), db: S
 @app.post("/inventory")
 def create_inventory_item(
     req: CreateInventoryItemRequest,
+    request: Request,
     current_user: models.User = Depends(require_write_role),
     db: Session = Depends(get_db)
 ):
+    cached = check_idempotency(request, db)
+    if cached:
+        return cached
+
+    client_ts, received_at = extract_timestamps(request, req.client_timestamp)
+
     item = models.InventoryItem(
         name=req.name,
         category=req.category,
@@ -525,7 +606,8 @@ def create_inventory_item(
         min_required=req.min_required,
         daily_use_per_person=req.daily_use_per_person,
         location_station=req.location_station,
-        cold_factor_sensitivity=req.cold_factor_sensitivity or 1.0
+        cold_factor_sensitivity=req.cold_factor_sensitivity or 1.0,
+        last_client_timestamp=client_ts
     )
     db.add(item)
     db.commit()
@@ -535,7 +617,13 @@ def create_inventory_item(
     last_log = db.query(AuditLog).order_by(AuditLog.id.desc()).first()
     prev_hash = last_log.hash if last_log else ("0" * 64)
     now_dt = datetime.now(timezone.utc)
-    payload = {"item_id": item.id, "name": item.name, "quantity": item.quantity}
+    payload = {
+        "item_id": item.id,
+        "name": item.name,
+        "quantity": item.quantity,
+        "client_timestamp": client_ts,
+        "received_at": received_at
+    }
     new_hash = AuditLog.compute_hash("INVENTORY_ADDED", current_user.username, f"INVENTORY-{item.id}", payload, now_dt, prev_hash)
 
     audit = AuditLog(
@@ -550,7 +638,7 @@ def create_inventory_item(
     db.add(audit)
     db.commit()
 
-    return {
+    res = {
         "id": item.id,
         "name": item.name,
         "category": item.category,
@@ -560,6 +648,100 @@ def create_inventory_item(
         "daily_use_per_person": item.daily_use_per_person,
         "location_station": item.location_station
     }
+    save_idempotency(request, 200, res, db)
+    return res
+
+@app.put("/inventory/{item_id}")
+@app.patch("/inventory/{item_id}")
+def update_inventory_item(
+    item_id: int,
+    req: UpdateInventoryItemRequest,
+    request: Request,
+    current_user: models.User = Depends(require_write_role),
+    db: Session = Depends(get_db)
+):
+    cached = check_idempotency(request, db)
+    if cached:
+        return cached
+
+    client_ts, received_at = extract_timestamps(request, req.client_timestamp)
+    item = db.query(models.InventoryItem).filter(models.InventoryItem.id == item_id).first()
+    if not item:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Inventory item not found")
+
+    # Conflict Resolution: Last-Write-Wins by client_timestamp
+    if item.last_client_timestamp and client_ts < item.last_client_timestamp:
+        res = {
+            "id": item.id,
+            "name": item.name,
+            "category": item.category,
+            "quantity": item.quantity,
+            "unit": item.unit,
+            "min_required": item.min_required,
+            "daily_use_per_person": item.daily_use_per_person,
+            "location_station": item.location_station,
+            "status": "conflict_skipped"
+        }
+        save_idempotency(request, 200, res, db)
+        return res
+
+    overwritten_value = item.quantity
+    if req.quantity is not None:
+        item.quantity = req.quantity
+    if req.name is not None:
+        item.name = req.name
+    if req.category is not None:
+        item.category = req.category
+    if req.unit is not None:
+        item.unit = req.unit
+    if req.min_required is not None:
+        item.min_required = req.min_required
+    if req.daily_use_per_person is not None:
+        item.daily_use_per_person = req.daily_use_per_person
+    if req.location_station is not None:
+        item.location_station = req.location_station
+    if req.cold_factor_sensitivity is not None:
+        item.cold_factor_sensitivity = req.cold_factor_sensitivity
+    item.last_client_timestamp = client_ts
+
+    db.commit()
+    db.refresh(item)
+
+    last_log = db.query(AuditLog).order_by(AuditLog.id.desc()).first()
+    prev_hash = last_log.hash if last_log else ("0" * 64)
+    now_dt = datetime.now(timezone.utc)
+    payload = {
+        "item_id": item.id,
+        "overwritten_value": overwritten_value,
+        "new_quantity": item.quantity,
+        "client_timestamp": client_ts,
+        "received_at": received_at
+    }
+    new_hash = AuditLog.compute_hash("INVENTORY_UPDATED", current_user.username, f"INVENTORY-{item.id}", payload, now_dt, prev_hash)
+    audit = AuditLog(
+        action="INVENTORY_UPDATED",
+        performed_by=current_user.username,
+        target_resource=f"INVENTORY-{item.id}",
+        payload=AuditLog.serialize_payload(payload),
+        timestamp=now_dt,
+        prev_hash=prev_hash,
+        hash=new_hash
+    )
+    db.add(audit)
+    db.commit()
+
+    res = {
+        "id": item.id,
+        "name": item.name,
+        "category": item.category,
+        "quantity": item.quantity,
+        "unit": item.unit,
+        "min_required": item.min_required,
+        "daily_use_per_person": item.daily_use_per_person,
+        "location_station": item.location_station
+    }
+    save_idempotency(request, 200, res, db)
+    return res
 
 @app.get("/inventory")
 def get_inventory(current_user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
@@ -569,9 +751,16 @@ def get_inventory(current_user: models.User = Depends(get_current_user), db: Ses
 @app.post("/cargo")
 def create_cargo(
     req: CreateCargoRequest,
+    request: Request,
     current_user: models.User = Depends(require_write_role),
     db: Session = Depends(get_db)
 ):
+    cached = check_idempotency(request, db)
+    if cached:
+        return cached
+
+    client_ts, received_at = extract_timestamps(request, req.client_timestamp)
+
     cargo = models.CargoShipment(
         shipment_code=req.shipment_code,
         title=req.title,
@@ -589,7 +778,15 @@ def create_cargo(
     last_log = db.query(AuditLog).order_by(AuditLog.id.desc()).first()
     prev_hash = last_log.hash if last_log else ("0" * 64)
     now_dt = datetime.now(timezone.utc)
-    payload = {"cargo_id": cargo.id, "code": cargo.shipment_code, "title": cargo.title, "priority": cargo.priority, "weight_kg": cargo.weight_kg}
+    payload = {
+        "cargo_id": cargo.id,
+        "code": cargo.shipment_code,
+        "title": cargo.title,
+        "priority": cargo.priority,
+        "weight_kg": cargo.weight_kg,
+        "client_timestamp": client_ts,
+        "received_at": received_at
+    }
     new_hash = AuditLog.compute_hash("CARGO_CREATED", current_user.username, f"CARGO-{cargo.id}", payload, now_dt, prev_hash)
     audit_entry = AuditLog(
         action="CARGO_CREATED",
@@ -603,7 +800,7 @@ def create_cargo(
     db.add(audit_entry)
     db.commit()
 
-    return {
+    res = {
         "id": cargo.id,
         "shipment_code": cargo.shipment_code,
         "title": cargo.title,
@@ -612,6 +809,66 @@ def create_cargo(
         "priority": cargo.priority,
         "status": cargo.status
     }
+    save_idempotency(request, 200, res, db)
+    return res
+
+@app.patch("/cargo/{cargo_id}/status")
+@app.put("/cargo/{cargo_id}")
+def update_cargo_status(
+    cargo_id: int,
+    req: UpdateCargoStatusRequest,
+    request: Request,
+    current_user: models.User = Depends(require_write_role),
+    db: Session = Depends(get_db)
+):
+    cached = check_idempotency(request, db)
+    if cached:
+        return cached
+
+    client_ts, received_at = extract_timestamps(request, req.client_timestamp)
+    cargo = db.query(models.CargoShipment).filter(models.CargoShipment.id == cargo_id).first()
+    if not cargo:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Cargo shipment not found")
+
+    old_status = cargo.status
+    cargo.status = req.status
+    db.commit()
+    db.refresh(cargo)
+
+    last_log = db.query(AuditLog).order_by(AuditLog.id.desc()).first()
+    prev_hash = last_log.hash if last_log else ("0" * 64)
+    now_dt = datetime.now(timezone.utc)
+    payload = {
+        "cargo_id": cargo.id,
+        "old_status": old_status,
+        "new_status": cargo.status,
+        "client_timestamp": client_ts,
+        "received_at": received_at
+    }
+    new_hash = AuditLog.compute_hash("CARGO_STATUS_CHANGED", current_user.username, f"CARGO-{cargo.id}", payload, now_dt, prev_hash)
+    audit = AuditLog(
+        action="CARGO_STATUS_CHANGED",
+        performed_by=current_user.username,
+        target_resource=f"CARGO-{cargo.id}",
+        payload=AuditLog.serialize_payload(payload),
+        timestamp=now_dt,
+        prev_hash=prev_hash,
+        hash=new_hash
+    )
+    db.add(audit)
+    db.commit()
+
+    res = {
+        "id": cargo.id,
+        "shipment_code": cargo.shipment_code,
+        "title": cargo.title,
+        "weight_kg": cargo.weight_kg,
+        "volume_m3": cargo.volume_m3,
+        "priority": cargo.priority,
+        "status": cargo.status
+    }
+    save_idempotency(request, 200, res, db)
+    return res
 
 @app.get("/cargo")
 def get_cargo(current_user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
@@ -621,9 +878,16 @@ def get_cargo(current_user: models.User = Depends(get_current_user), db: Session
 @app.post("/vehicles")
 def create_vehicle(
     req: CreateVehicleRequest,
+    request: Request,
     current_user: models.User = Depends(require_write_role),
     db: Session = Depends(get_db)
 ):
+    cached = check_idempotency(request, db)
+    if cached:
+        return cached
+
+    client_ts, received_at = extract_timestamps(request, req.client_timestamp)
+
     v = models.Vehicle(
         name=req.name,
         type=req.type,
@@ -641,7 +905,14 @@ def create_vehicle(
     last_log = db.query(AuditLog).order_by(AuditLog.id.desc()).first()
     prev_hash = last_log.hash if last_log else ("0" * 64)
     now_dt = datetime.now(timezone.utc)
-    payload = {"vehicle_id": v.id, "name": v.name, "type": v.type, "station": v.station_name}
+    payload = {
+        "vehicle_id": v.id,
+        "name": v.name,
+        "type": v.type,
+        "station": v.station_name,
+        "client_timestamp": client_ts,
+        "received_at": received_at
+    }
     new_hash = AuditLog.compute_hash("VEHICLE_CREATED", current_user.username, f"VEHICLE-{v.id}", payload, now_dt, prev_hash)
     audit_entry = AuditLog(
         action="VEHICLE_CREATED",
@@ -654,7 +925,8 @@ def create_vehicle(
     )
     db.add(audit_entry)
     db.commit()
-    return {
+
+    res = {
         "id": v.id,
         "name": v.name,
         "type": v.type,
@@ -664,11 +936,13 @@ def create_vehicle(
         "weather_limit": v.weather_limit,
         "station_name": v.station_name
     }
-
+    save_idempotency(request, 200, res, db)
+    return res
 
 @app.get("/vehicles")
 def get_vehicles(current_user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
     return db.query(models.Vehicle).all()
+
 
 # --- People Route ---
 @app.get("/people")
@@ -684,9 +958,15 @@ def get_alerts(current_user: models.User = Depends(get_current_user), db: Sessio
 @app.post("/sos")
 def trigger_sos(
     req: SOSRequest,
+    request: Request,
     current_user: models.User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
+    cached = check_idempotency(request, db)
+    if cached:
+        return cached
+
+    client_ts, received_at = extract_timestamps(request, req.client_timestamp)
     skill_target = req.skill_needed.lower()
     cutoff_time = datetime.now(timezone.utc) - timedelta(minutes=10)
 
@@ -704,10 +984,12 @@ def trigger_sos(
             matching_people.append(p)
 
     if not matching_people:
-        return {
+        res = {
             "status": "No Responder Available",
             "message": f"No responder with '{req.skill_needed}' skill has updated location in the last 10 minutes."
         }
+        save_idempotency(request, 200, res, db)
+        return res
 
     nearest_person = None
     min_person_dist = float("inf")
@@ -758,13 +1040,18 @@ def trigger_sos(
     prev_hash = last_log.hash if last_log else ("0" * 64)
     now_dt = datetime.now(timezone.utc)
 
+    resp_dist = round(min_person_dist, 2) if min_person_dist != float("inf") else 0.0
+    veh_dist = round(min_vehicle_dist, 2) if min_vehicle_dist != float("inf") else 0.0
+
     payload_dict = {
         "alert_id": new_alert.id,
         "skill_requested": req.skill_needed,
         "responder": responder_name,
-        "responder_distance_km": min_person_dist,
+        "responder_distance_km": resp_dist,
         "vehicle": vehicle_name,
-        "vehicle_distance_km": min_vehicle_dist
+        "vehicle_distance_km": veh_dist,
+        "client_timestamp": client_ts,
+        "received_at": received_at
     }
 
     new_hash = AuditLog.compute_hash("SOS_DISPATCH", current_user.username, f"ALERT-{new_alert.id}", payload_dict, now_dt, prev_hash)
@@ -780,16 +1067,19 @@ def trigger_sos(
     db.add(audit_entry)
     db.commit()
 
-    return {
+    res = {
         "status": "Dispatched",
         "responder_name": responder_name,
         "responder_role": nearest_person.role if nearest_person else "Responder",
-        "responder_distance_km": min_person_dist,
+        "responder_distance_km": resp_dist,
         "vehicle_name": vehicle_name,
-        "vehicle_distance_km": min_vehicle_dist,
+        "vehicle_distance_km": veh_dist,
         "alert_id": new_alert.id,
         "audit_hash": audit_entry.hash
     }
+    save_idempotency(request, 200, res, db)
+    return res
+
 
 # --- Strict DB-Computed Dashboard Summary Route ---
 @app.get("/dashboard/summary")
@@ -1152,6 +1442,8 @@ def run_monte_carlo_stockout_simulation(
     and P10/P50/P90 days to stockout using NumPy.
     Daily consumption noise: Lognormal(sigma=0.10) (~10% daily variance).
     Resupply arrival day jitter: Normal(mean=0, sigma=1.0 day).
+    Uses item-specific seed for reproducible random noise so identical item parameters
+    yield identical baseline and scenario results.
     """
     cold_factor = calculate_cold_factor(temp_c, cold_factor_sensitivity)
     base_daily_burn = team_size * daily_use_per_person * cold_factor
@@ -1174,16 +1466,20 @@ def run_monte_carlo_stockout_simulation(
             "risk_level": "Critical" if effective_initial_qty <= 0 else "Low"
         }
 
-    # Arrival day calculation per run with normal jitter (sigma=1 day)
+    # Deterministic item seed for reproducible daily noise per item
+    item_seed = abs(hash(item_name)) % 1000000
+    rng = np.random.RandomState(item_seed)
+
     target_arrival_base = resupply_in_days + delay_days + blizzard_days
-    arrival_jitters = np.random.normal(loc=0.0, scale=1.0, size=runs)
+    arrival_jitters = rng.normal(loc=0.0, scale=1.0, size=runs)
     arrival_days = np.maximum(1.0, target_arrival_base + arrival_jitters)
 
-    # Max days to simulate per run
-    max_days = int(np.ceil(np.max(arrival_days))) + 90
+    # Compute simulation horizon max_days based on expected stockout days
+    expected_days = effective_initial_qty / base_daily_burn
+    max_days = int(np.ceil(max(target_arrival_base + 90.0, expected_days * 1.5)))
 
-    # Daily consumption noise matrix: Lognormal(mean=-0.005, sigma=0.10)
-    daily_noise = np.random.lognormal(mean=-0.005, sigma=0.10, size=(runs, max_days))
+    # Generate daily consumption noise matrix (runs x max_days)
+    daily_noise = rng.lognormal(mean=-0.005, sigma=0.10, size=(runs, max_days))
     daily_burn_matrix = base_daily_burn * daily_noise
     cum_burn = np.cumsum(daily_burn_matrix, axis=1)
 

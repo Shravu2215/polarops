@@ -13,37 +13,52 @@ import { MaterialIcons } from '@expo/vector-icons';
 import { colors, spacing, radius, typography, layout } from '../theme';
 import { BACKEND_URL } from '../config';
 import { useApp } from '../context/AppContext';
+import { useSyncQueue } from '../context/SyncContext';
 
 interface SOSResponse {
   status: string;
-  responder_name: string;
-  responder_role: string;
-  responder_distance_km: number;
-  vehicle_name: string;
-  vehicle_distance_km: number;
-  alert_id: number;
-  audit_hash: string;
+  responder_name?: string;
+  responder_role?: string;
+  responder_distance_km?: number;
+  vehicle_name?: string;
+  vehicle_distance_km?: number;
+  alert_id?: number;
+  audit_hash?: string;
+  message?: string;
 }
 
 export default function SOSScreen() {
   const router = useRouter();
-  const { user } = useApp();
+  const { user, syncStatus } = useApp();
+  const { addToQueue } = useSyncQueue();
   const [selectedSkill, setSelectedSkill] = useState<string>('doctor');
   const [loading, setLoading] = useState<boolean>(false);
   const [result, setResult] = useState<SOSResponse | null>(null);
 
   const handleTriggerSOS = async () => {
     setLoading(true);
+    const sosPayload = {
+      skill_needed: selectedSkill,
+      latitude: -70.7800,
+      longitude: 11.7500,
+      performed_by: user?.username || 'Team Member',
+    };
+
+    if (syncStatus === 'Offline') {
+      await addToQueue('sos', sosPayload, 0, '/sos', 'POST');
+      setResult({
+        status: 'Saved on device',
+        message: 'Saved on device. It will be sent when a connection is available.',
+      });
+      setLoading(false);
+      return;
+    }
+
     try {
       const response = await fetch(`${BACKEND_URL}/sos`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          skill_needed: selectedSkill,
-          latitude: -70.7800,
-          longitude: 11.7500,
-          performed_by: user?.username || 'Team Member',
-        }),
+        body: JSON.stringify(sosPayload),
       });
 
       if (!response.ok) {
@@ -53,16 +68,11 @@ export default function SOSScreen() {
       const resData: SOSResponse = await response.json();
       setResult(resData);
     } catch (err) {
-      console.log('SOS backend dispatch error, showing local fallback:', err);
+      console.log('SOS backend dispatch network error, queueing locally:', err);
+      await addToQueue('sos', sosPayload, 0, '/sos', 'POST');
       setResult({
-        status: 'Dispatched',
-        responder_name: selectedSkill === 'doctor' ? 'Dr. Rahul Sharma' : 'Vikram Singh',
-        responder_role: selectedSkill === 'doctor' ? 'Medical Officer' : 'Chief Mechanic',
-        responder_distance_km: 0.18,
-        vehicle_name: selectedSkill === 'doctor' ? 'PistenBully 100 Medical' : 'Sno-Cat Alpha',
-        vehicle_distance_km: 0.18,
-        alert_id: 3,
-        audit_hash: 'c599a5fbed8577ccd2a18843b5f7f813b9e0cde5b6dbf4c799b737b5189d48a0',
+        status: 'Saved on device',
+        message: 'Saved on device. It will be sent when a connection is available.',
       });
     } finally {
       setLoading(false);
@@ -128,43 +138,58 @@ export default function SOSScreen() {
           ))}
         </View>
 
-        {/* Result Card if SOS Dispatched */}
+        {/* Result Card if SOS Dispatched or Saved Offline */}
         {result ? (
-          <View style={styles.resultCard}>
-            <View style={styles.resultHeader}>
-              <MaterialIcons name="check-circle" size={22} color={colors.primary} />
-              <Text style={styles.resultStatusText}>DISPATCH CONFIRMED</Text>
-            </View>
-
-            <View style={styles.resultRow}>
-              <Text style={styles.resultLabel}>Assigned Responder:</Text>
-              <Text style={styles.resultValue}>
-                {result.responder_name} ({result.responder_role})
+          result.status === 'Saved on device' ? (
+            <View style={[styles.resultCard, { borderColor: '#F59E0B', backgroundColor: '#FEF3C7' }]}>
+              <View style={styles.resultHeader}>
+                <MaterialIcons name="cloud-queue" size={22} color="#D97706" />
+                <Text style={[styles.resultStatusText, { color: '#B45309' }]}>SAVED ON DEVICE</Text>
+              </View>
+              <Text style={{ fontFamily: typography.fontFamily.medium, fontSize: typography.fontSize.sm, color: '#92400E', marginTop: spacing.xs }}>
+                {result.message}
               </Text>
             </View>
+          ) : (
+            <View style={styles.resultCard}>
+              <View style={styles.resultHeader}>
+                <MaterialIcons name="check-circle" size={22} color={colors.primary} />
+                <Text style={styles.resultStatusText}>DISPATCH CONFIRMED</Text>
+              </View>
 
-            <View style={styles.resultRow}>
-              <Text style={styles.resultLabel}>Responder Distance:</Text>
-              <Text style={styles.resultValue}>{result.responder_distance_km} km</Text>
-            </View>
+              <View style={styles.resultRow}>
+                <Text style={styles.resultLabel}>Assigned Responder:</Text>
+                <Text style={styles.resultValue}>
+                  {result.responder_name} ({result.responder_role})
+                </Text>
+              </View>
 
-            <View style={styles.resultRow}>
-              <Text style={styles.resultLabel}>Deployed Vehicle:</Text>
-              <Text style={styles.resultValue}>{result.vehicle_name}</Text>
-            </View>
+              <View style={styles.resultRow}>
+                <Text style={styles.resultLabel}>Responder Distance:</Text>
+                <Text style={styles.resultValue}>{result.responder_distance_km} km</Text>
+              </View>
 
-            <View style={styles.resultRow}>
-              <Text style={styles.resultLabel}>Ledger Audit Hash:</Text>
-              <Text style={styles.hashText} numberOfLines={1}>
-                {result.audit_hash}
-              </Text>
+              <View style={styles.resultRow}>
+                <Text style={styles.resultLabel}>Deployed Vehicle:</Text>
+                <Text style={styles.resultValue}>{result.vehicle_name}</Text>
+              </View>
+
+              <View style={styles.resultRow}>
+                <Text style={styles.resultLabel}>Ledger Audit Hash:</Text>
+                <Text style={styles.hashText} numberOfLines={1}>
+                  {result.audit_hash}
+                </Text>
+              </View>
             </View>
-          </View>
+          )
         ) : null}
 
         {/* SOS Trigger Button */}
         <TouchableOpacity
-          style={[styles.bigSosButton, result && styles.bigSosButtonDispatched]}
+          style={[
+            styles.bigSosButton,
+            result && (result.status === 'Saved on device' ? { backgroundColor: '#D97706' } : styles.bigSosButtonDispatched)
+          ]}
           onPress={handleTriggerSOS}
           disabled={loading || !!result}
           activeOpacity={0.8}
@@ -174,16 +199,16 @@ export default function SOSScreen() {
           ) : (
             <>
               <MaterialIcons
-                name={result ? 'verified' : 'touch-app'}
+                name={result ? (result.status === 'Saved on device' ? 'cloud-queue' : 'verified') : 'touch-app'}
                 size={40}
                 color={colors.white}
               />
               <Text style={styles.bigSosButtonText}>
-                {result ? 'RESPONDER DISPATCHED' : 'BROADCAST EMERGENCY SOS'}
+                {result ? (result.status === 'Saved on device' ? 'SAVED ON DEVICE (PENDING SYNC)' : 'RESPONDER DISPATCHED') : 'BROADCAST EMERGENCY SOS'}
               </Text>
               <Text style={styles.bigSosSubText}>
                 {result
-                  ? 'Units en route to your coordinates'
+                  ? (result.status === 'Saved on device' ? 'Action queued. Will auto-send when connection is restored.' : 'Units en route to your coordinates')
                   : 'Tap to trigger immediate responder dispatch'}
               </Text>
             </>
@@ -193,6 +218,7 @@ export default function SOSScreen() {
     </SafeAreaView>
   );
 }
+
 
 const styles = StyleSheet.create({
   container: {

@@ -7,6 +7,8 @@ import { AppProvider, useApp } from '../context/AppContext';
 import { StatusBar } from 'expo-status-bar';
 import { startLocationReporting, stopLocationReporting } from '../services/locationService';
 
+import { SyncProvider } from '../context/SyncContext';
+
 SplashScreen.preventAutoHideAsync();
 
 function LocationWatcher() {
@@ -44,19 +46,21 @@ export default function RootLayout() {
   return (
     <SafeAreaProvider>
       <AppProvider>
-        <LocationWatcher />
-        <StatusBar style="dark" />
-        <Stack screenOptions={{ headerShown: false }}>
-          <Stack.Screen name="login" />
-          <Stack.Screen name="(tabs)" />
-          <Stack.Screen name="sos" options={{ presentation: 'modal' }} />
-          <Stack.Screen name="planner" />
-          <Stack.Screen name="cargo" />
-          <Stack.Screen name="simulator" />
-          <Stack.Screen name="compliance" />
-        </Stack>
+        <SyncProvider>
+          <LocationWatcher />
+          <StatusBar style="dark" />
+          <Stack screenOptions={{ headerShown: false }}>
+            <Stack.Screen name="login" />
+            <Stack.Screen name="(tabs)" />
+            <Stack.Screen name="sos" options={{ presentation: 'modal' }} />
+            <Stack.Screen name="planner" />
+            <Stack.Screen name="cargo" />
+            <Stack.Screen name="simulator" />
+            <Stack.Screen name="compliance" />
+            <Stack.Screen name="sync" />
+          </Stack>
+        </SyncProvider>
       </AppProvider>
     </SafeAreaProvider>
-
   );
 }

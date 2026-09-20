@@ -1,8 +1,10 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect } from 'react';
 import { View, Text, StyleSheet, TouchableOpacity } from 'react-native';
 import { MaterialIcons } from '@expo/vector-icons';
 import NetInfo from '@react-native-community/netinfo';
-import { useApp, SyncStatus } from '../context/AppContext';
+import { useRouter } from 'expo-router';
+import { useApp } from '../context/AppContext';
+import { useSyncQueue } from '../context/SyncContext';
 import { colors, spacing, radius, typography, layout } from '../theme';
 import { BACKEND_URL } from '../config';
 
@@ -11,7 +13,9 @@ interface HeaderProps {
 }
 
 export const Header: React.FC<HeaderProps> = ({ title }) => {
+  const router = useRouter();
   const { syncStatus, setSyncStatus } = useApp();
+  const { pendingCount } = useSyncQueue();
 
   useEffect(() => {
     const unsubscribe = NetInfo.addEventListener((state) => {
@@ -54,16 +58,23 @@ export const Header: React.FC<HeaderProps> = ({ title }) => {
     }
   };
 
+  const getChipLabel = () => {
+    if (pendingCount > 0) {
+      return `${syncStatus}, ${pendingCount} pending`;
+    }
+    return syncStatus;
+  };
+
   return (
     <View style={styles.container}>
       <Text style={styles.title}>{title}</Text>
 
       <View style={styles.rightContainer}>
-        {/* Automatic Sync Status Chip */}
-        <View style={styles.chip}>
+        {/* Automatic Sync Status Chip (Navigates to /sync) */}
+        <TouchableOpacity style={styles.chip} onPress={() => router.push('/sync')} activeOpacity={0.7}>
           <View style={[styles.statusDot, { backgroundColor: getStatusColor() }]} />
-          <Text style={styles.chipText}>{syncStatus}</Text>
-        </View>
+          <Text style={styles.chipText}>{getChipLabel()}</Text>
+        </TouchableOpacity>
 
         {/* Notification Bell */}
         <TouchableOpacity style={styles.iconButton} activeOpacity={0.7}>
@@ -74,6 +85,7 @@ export const Header: React.FC<HeaderProps> = ({ title }) => {
     </View>
   );
 };
+
 
 const styles = StyleSheet.create({
   container: {

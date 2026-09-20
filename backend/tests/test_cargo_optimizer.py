@@ -2,6 +2,7 @@ import os
 import sys
 import json
 import sqlite3
+from datetime import datetime, timezone
 
 # MANDATORY TEST HYGIENE: Force temporary database before ANY backend imports
 TEMP_DB_NAME = "test_polarops_temp.db"
@@ -135,5 +136,216 @@ def test_forecast_cargo_and_audit():
     except OSError:
         pass
 
+def test_simulator_and_priority_sync():
+    if os.path.exists(TEMP_DB_NAME):
+        try:
+            os.remove(TEMP_DB_NAME)
+        except OSError:
+            pass
+
+    Base.metadata.create_all(bind=engine)
+    client = TestClient(app)
+
+    # Register and Login
+    client.post("/auth/register", json={
+        "username": "test_leader",
+        "email": "leader2@polarops.in",
+        "password": "leader_test_password_2026"
+    })
+    login_res = client.post("/auth/login", json={
+        "email": "leader2@polarops.in",
+        "password": "leader_test_password_2026"
+    })
+    token = login_res.json()["access_token"]
+    headers = {"Authorization": f"Bearer {token}"}
+
+    from database import SessionLocal
+    db = SessionLocal()
+    u = db.query(models.User).filter(models.User.email == "leader2@polarops.in").first()
+    if u:
+        u.role = "Expedition Leader"
+        db.commit()
+    db.close()
+
+    print("\n==================================================")
+    print("PART 1 TEST: SIMULATOR FIXES & ASSERTIONS")
+    print("==================================================")
+
+    # 1. Create Active Expedition
+    exp_res = client.post("/expeditions", json={
+        "name": "Maitri Expedition 45",
+        "station_name": "Maitri",
+        "latitude": -70.7660,
+        "longitude": 11.7330,
+        "start_date": "2026-01-01",
+        "end_date": "2026-12-31",
+        "target_team_size": 6,
+        "status": "Active"
+    }, headers=headers)
+    print(f"Expedition Status: {exp_res.status_code}, body: {exp_res.text}")
+    assert exp_res.status_code == 200
+
+    # 2. Add Ration item: 5000 packs, daily use 3.0, cold sensitivity 1.0 (cf=1.335 @ -33.5C)
+    ration_res = client.post("/inventory", json={
+        "name": "Emergency Ration Packs",
+        "category": "Ration",
+        "quantity": 5000,
+        "unit": "Packs",
+        "min_required": 500,
+        "daily_use_per_person": 3.0,
+        "location_station": "Maitri",
+        "cold_factor_sensitivity": 1.0
+    }, headers=headers)
+    assert ration_res.status_code == 200
+
+    # 3. Add Fuel item
+    fuel_res = client.post("/inventory", json={
+        "name": "Jet-A1 Fuel",
+        "category": "Fuel",
+        "quantity": 8000,
+        "unit": "Litres",
+        "min_required": 1000,
+        "daily_use_per_person": 5.0,
+        "location_station": "Maitri",
+        "cold_factor_sensitivity": 1.0
+    }, headers=headers)
+    assert fuel_res.status_code == 200
+
+    # 4. Run /simulate with fuel_loss_percent=25.0
+    sim_res = client.post("/simulate", json={
+        "resupply_in_days": 60,
+        "delay_days": 0,
+        "blizzard_days": 0,
+        "fuel_loss_percent": 25.0,
+        "temperature": -33.5,
+        "runs": 1000
+    }, headers=headers)
+    assert sim_res.status_code == 200
+    sim_data = sim_res.json()
+    print("Simulator Output:")
+    print(json.dumps(sim_data, indent=2))
+
+    ration_b = next(item for item in sim_data["baseline_items"] if item["category"] == "Ration")
+    ration_s = next(item for item in sim_data["scenario_items"] if item["category"] == "Ration")
+    b_p50 = ration_b["p50_days"]
+    b_p10 = ration_b["p10_days"]
+    b_p90 = ration_b["p90_days"]
+
+    expected_days = 5000.0 / (6 * 3.0 * 1.335)  # ~208.07
+
+    # Assertion (a): Baseline and scenario are identical for Rations when only fuel_loss_percent is set
+    assert ration_b == ration_s, "Ration baseline & scenario MUST be identical when fuel_loss_percent only is changed!"
+    print("-> ASSERTION (a) PASSED: Baseline and scenario are 100% identical for Ration!")
+
+    # Assertion (b): P50 is within 2 percent of quantity / (team x daily_use x cold_factor)
+    p50_diff_percent = abs(b_p50 - expected_days) / expected_days * 100.0
+    print(f"Ration P50 = {b_p50}, Expected = {expected_days:.2f}, Diff = {p50_diff_percent:.2f}%")
+    assert p50_diff_percent <= 2.0, f"P50 ({b_p50}) is not within 2% of expected ({expected_days:.2f})"
+    print("-> ASSERTION (b) PASSED: P50 is within 2% of expected days formula!")
+
+    # Assertion (c): Spread is greater than zero
+    spread = b_p90 - b_p10
+    print(f"Ration Spread (P90 - P10) = {spread:.2f} days")
+    assert spread > 0, "Spread (P90 - P10) MUST be > 0!"
+    print("-> ASSERTION (c) PASSED: Spread is greater than zero!")
+
+
+    print("\n==================================================")
+    print("PART 2 TEST: PRIORITY SYNC FLUSH ORDER & IDEMPOTENCY REPLAY")
+    print("==================================================")
+
+    # Seed Person record with fresh location for SOS dispatch matching
+    db = SessionLocal()
+    p = models.Person(
+        name="Dr Rahul",
+        role="Expedition Leader",
+        skills=["leader", "medical"],
+        latitude=-70.7660,
+        longitude=11.7330,
+        station_name="Maitri",
+        status="Active",
+        last_location_update=datetime.now(timezone.utc)
+    )
+    db.add(p)
+    db.commit()
+    db.close()
+
+    # Setup client-side offline queue (Low inventory, then cargo, then SOS)
+    queue = [
+        {"priority": 2, "type": "inventory", "key": "idem-inv-101", "endpoint": "/inventory", "method": "POST", "body": {
+            "name": "Spare Batteries", "category": "Spares", "quantity": 50, "unit": "Units",
+            "min_required": 10, "daily_use_per_person": 0.1, "location_station": "Maitri", "client_timestamp": "2026-09-21T00:00:01Z"
+        }},
+        {"priority": 1, "type": "cargo", "key": "idem-cargo-101", "endpoint": "/cargo", "method": "POST", "body": {
+            "shipment_code": "CRG-TEST", "title": "Medical Oxygen", "weight_kg": 40, "volume_m3": 0.4,
+            "priority": "High", "status": "Pending", "client_timestamp": "2026-09-21T00:00:02Z"
+        }},
+        {"priority": 0, "type": "sos", "key": "idem-sos-101", "endpoint": "/sos", "method": "POST", "body": {
+            "skill_needed": "Leader", "latitude": -70.7660, "longitude": 11.7330, "client_timestamp": "2026-09-21T00:00:03Z"
+        }}
+    ]
+
+    # Mobile queue flush sorts strictly by priority ascending (0, then 1, then 2)
+    sorted_queue = sorted(queue, key=lambda x: (x["priority"], x["body"]["client_timestamp"]))
+    print("Sorted Queue Flush Order:")
+    for idx, item in enumerate(sorted_queue):
+        print(f"  Step {idx+1}: Priority {item['priority']} ({item['type']}) - Idempotency Key: {item['key']}")
+
+    assert sorted_queue[0]["type"] == "sos", "SOS MUST be sent first!"
+    assert sorted_queue[1]["type"] == "cargo", "Cargo MUST be sent second!"
+    assert sorted_queue[2]["type"] == "inventory", "Inventory MUST be sent third!"
+
+    # Execute sorted queue requests to server
+    for item in sorted_queue:
+        req_headers = {**headers, "Idempotency-Key": item["key"], "Client-Timestamp": item["body"]["client_timestamp"]}
+        r = client.post(item["endpoint"], json=item["body"], headers=req_headers)
+        assert r.status_code == 200, f"Failed to execute {item['type']}: {r.text}"
+
+    # Verify processing order in server Audit Logs
+    conn = sqlite3.connect(TEMP_DB_NAME)
+    cursor = conn.cursor()
+    cursor.execute("SELECT action, target_resource, payload FROM audit_logs ORDER BY id ASC")
+    logs = cursor.fetchall()
+    conn.close()
+
+    print("\nAudit Logs Recorded in DB:")
+    recent_actions = [l[0] for l in logs if l[0] in ("SOS_DISPATCH", "CARGO_CREATED", "INVENTORY_ADDED") and "Spare Batteries" in l[2] or "CRG-TEST" in l[2] or "SOS" in l[0]]
+    for act in recent_actions:
+        print(f"  Logged Action: {act}")
+
+    # SOS dispatched first, cargo created second, inventory added third
+    assert recent_actions[0] == "SOS_DISPATCH", "Server MUST process SOS first!"
+    assert recent_actions[1] == "CARGO_CREATED", "Server MUST process Cargo second!"
+    assert recent_actions[2] == "INVENTORY_ADDED", "Server MUST process Inventory third!"
+    print("-> VERIFIED: Queue processed strictly in Priority order (SOS=0 -> Cargo=1 -> Inventory=2)!")
+
+    # Test Idempotency Replay (resend SOS with identical key)
+    sos_item = sorted_queue[0]
+    replay_headers = {**headers, "Idempotency-Key": sos_item["key"], "Client-Timestamp": sos_item["body"]["client_timestamp"]}
+    replay_res = client.post(sos_item["endpoint"], json=sos_item["body"], headers=replay_headers)
+    assert replay_res.status_code == 200, "Replay must return HTTP 200"
+
+    # Count alerts & audit logs in DB
+    conn = sqlite3.connect(TEMP_DB_NAME)
+    cursor = conn.cursor()
+    cursor.execute("SELECT COUNT(*) FROM alerts WHERE alert_type = 'SOS'")
+    alert_count = cursor.fetchone()[0]
+    cursor.execute("SELECT COUNT(*) FROM audit_logs WHERE action = 'SOS_DISPATCH'")
+    sos_audit_count = cursor.fetchone()[0]
+    conn.close()
+
+    print(f"Alerts Count in DB: {alert_count} (expected: 1)")
+    print(f"SOS Audit Logs in DB: {sos_audit_count} (expected: 1)")
+    assert alert_count == 1, "Idempotency replay MUST NOT create duplicate Alert!"
+    assert sos_audit_count == 1, "Idempotency replay MUST NOT create duplicate AuditLog!"
+    print("-> VERIFIED: Idempotency replay returned cached result with zero duplicates!")
+
+    # Teardown
+    try:
+        os.remove(TEMP_DB_NAME)
+    except OSError:
+        pass
+
 if __name__ == "__main__":
     test_forecast_cargo_and_audit()
+    test_simulator_and_priority_sync()

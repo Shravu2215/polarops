@@ -16,12 +16,14 @@ import { MaterialIcons } from '@expo/vector-icons';
 import * as SecureStore from 'expo-secure-store';
 import Header from '../../components/Header';
 import { useApp } from '../../context/AppContext';
+import { useSyncQueue } from '../../context/SyncContext';
 import { colors, spacing, radius, typography, layout } from '../../theme';
 import { BACKEND_URL } from '../../config';
 
 export default function MoreScreen() {
   const router = useRouter();
   const { user, token, logout } = useApp();
+  const { pendingCount, addToQueue } = useSyncQueue();
 
   // Modals state
   const [showExpeditionModal, setShowExpeditionModal] = useState<boolean>(false);
@@ -219,8 +221,21 @@ export default function MoreScreen() {
         </View>
 
         {/* Module Shortcuts */}
-        <Text style={styles.sectionHeader}>Analytical Tools</Text>
+        <Text style={styles.sectionHeader}>Analytical & Sync Tools</Text>
         <View style={styles.menuContainer}>
+          <TouchableOpacity style={styles.menuItem} onPress={() => router.push('/sync')}>
+            <MaterialIcons name="sync" size={22} color={colors.primary} />
+            <View style={{ flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingRight: spacing.sm }}>
+              <Text style={styles.menuText}>Sync Queue</Text>
+              {pendingCount > 0 ? (
+                <View style={styles.pendingBadge}>
+                  <Text style={styles.pendingBadgeText}>{pendingCount} pending</Text>
+                </View>
+              ) : null}
+            </View>
+            <MaterialIcons name="chevron-right" size={22} color={colors.secondaryText} />
+          </TouchableOpacity>
+
           <TouchableOpacity style={styles.menuItem} onPress={() => router.push('/planner')}>
             <MaterialIcons name="event" size={22} color={colors.primary} />
             <Text style={styles.menuText}>Expedition Planner</Text>
@@ -476,4 +491,17 @@ const styles = StyleSheet.create({
     marginTop: spacing.md,
   },
   submitBtnText: { fontFamily: typography.fontFamily.bold, fontSize: typography.fontSize.xs, color: colors.white, letterSpacing: 0.5 },
+  pendingBadge: {
+    backgroundColor: '#FEF3C7',
+    paddingHorizontal: spacing.xs,
+    paddingVertical: 2,
+    borderRadius: radius.pill,
+    borderWidth: 1,
+    borderColor: '#F59E0B',
+  },
+  pendingBadgeText: {
+    fontFamily: typography.fontFamily.bold,
+    fontSize: 10,
+    color: '#B45309',
+  },
 });

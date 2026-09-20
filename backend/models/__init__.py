@@ -7,6 +7,7 @@ from models.person import Person
 from models.alert import Alert
 from models.audit import AuditLog, verify_chain
 from models.vehicle import Vehicle
+from models.idempotency import IdempotencyRecord
 
 __all__ = [
     "Base",
@@ -18,5 +19,6 @@ __all__ = [
     "Alert",
     "AuditLog",
     "Vehicle",
+    "IdempotencyRecord",
     "verify_chain"
 ]

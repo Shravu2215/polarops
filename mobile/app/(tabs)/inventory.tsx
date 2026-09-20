@@ -20,6 +20,9 @@ import { useApp } from '../../context/AppContext';
 import { colors, spacing, radius, typography } from '../../theme';
 import { BACKEND_URL } from '../../config';
 
+import AsyncStorage from '@react-native-async-storage/async-storage';
+import { useSyncQueue } from '../../context/SyncContext';
+
 interface ForecastItem {
   id: number;
   name: string;
@@ -48,13 +51,15 @@ const CATEGORIES = ['All', 'Fuel', 'Ration', 'Spares', 'Medical', 'Equipment'];
 const DAYS_OPTIONS = [15, 30, 60, 90];
 
 export default function InventoryScreen() {
-  const { token, user } = useApp();
+  const { token, user, syncStatus } = useApp();
+  const { addToQueue } = useSyncQueue();
   const [selectedCategory, setSelectedCategory] = useState<string>('All');
   const [liveTemp, setLiveTemp] = useState<number | null>(null);
   const [temperature, setTemperature] = useState<number>(-33.5);
   const [isInitialLoad, setIsInitialLoad] = useState<boolean>(true);
   const [forecastDays, setForecastDays] = useState<number>(30);
   const [forecastData, setForecastData] = useState<ForecastResponse | null>(null);
+  const [isUsingCached, setIsUsingCached] = useState<boolean>(false);
   const [loading, setLoading] = useState<boolean>(true);
   const [refreshing, setRefreshing] = useState<boolean>(false);
   const [showAddModal, setShowAddModal] = useState<boolean>(false);
@@ -84,6 +89,8 @@ export default function InventoryScreen() {
       if (res.ok) {
         const data: ForecastResponse = await res.json();
         setForecastData(data);
+        setIsUsingCached(false);
+        AsyncStorage.setItem('@polarops_cache_inventory', JSON.stringify(data));
         if (liveTemp === null && data.temperature_c !== undefined) {
           setLiveTemp(data.temperature_c);
           if (isInitialLoad) {
@@ -91,9 +98,16 @@ export default function InventoryScreen() {
             setIsInitialLoad(false);
           }
         }
+      } else {
+        throw new Error('Network error');
       }
     } catch (e) {
-      console.log('Error fetching forecast:', e);
+      console.log('Loading inventory from AsyncStorage cache:', e);
+      const cached = await AsyncStorage.getItem('@polarops_cache_inventory');
+      if (cached) {
+        setForecastData(JSON.parse(cached));
+        setIsUsingCached(true);
+      }
     } finally {
       setLoading(false);
       setRefreshing(false);
@@ -124,6 +138,26 @@ export default function InventoryScreen() {
     }
 
     setSubmitting(true);
+    const itemPayload = {
+      name: itemName.trim(),
+      category: itemCategory,
+      quantity: parseFloat(quantity) || 0,
+      unit: unit.trim(),
+      min_required: parseFloat(minReq) || 0,
+      daily_use_per_person: parseFloat(dailyUse) || 1.0,
+      location_station: stationName.trim() || 'Maitri',
+      cold_factor_sensitivity: parseFloat(sensitivity) || 1.0,
+    };
+
+    if (syncStatus === 'Offline') {
+      await addToQueue('inventory_create', itemPayload, 2, '/inventory', 'POST');
+      Alert.alert('Saved to Queue', 'Item saved on device. It will be synced when connected.');
+      setShowAddModal(false);
+      setItemName('');
+      setSubmitting(false);
+      return;
+    }
+
     try {
       const res = await fetch(`${BACKEND_URL}/inventory`, {
         method: 'POST',
@@ -131,16 +165,7 @@ export default function InventoryScreen() {
           'Content-Type': 'application/json',
           Authorization: `Bearer ${token}`,
         },
-        body: JSON.stringify({
-          name: itemName.trim(),
-          category: itemCategory,
-          quantity: parseFloat(quantity) || 0,
-          unit: unit.trim(),
-          min_required: parseFloat(minReq) || 0,
-          daily_use_per_person: parseFloat(dailyUse) || 1.0,
-          location_station: stationName.trim() || 'Maitri',
-          cold_factor_sensitivity: parseFloat(sensitivity) || 1.0,
-        }),
+        body: JSON.stringify(itemPayload),
       });
 
       if (!res.ok) {
@@ -153,7 +178,11 @@ export default function InventoryScreen() {
       setItemName('');
       fetchForecast(temperature, forecastDays);
     } catch (err: any) {
-      Alert.alert('Error', err.message || 'Failed to add stock item.');
+      console.log('Network error adding stock, saving to queue:', err);
+      await addToQueue('inventory_create', itemPayload, 2, '/inventory', 'POST');
+      Alert.alert('Saved to Queue', 'Item saved on device. It will be synced when connected.');
+      setShowAddModal(false);
+      setItemName('');
     } finally {
       setSubmitting(false);
     }
@@ -162,6 +191,7 @@ export default function InventoryScreen() {
   const filteredItems = (forecastData?.items || []).filter(
     (i) => selectedCategory === 'All' || i.category.toLowerCase() === selectedCategory.toLowerCase()
   );
+
 
   const getStatusColor = (status: string) => {
     switch (status.toUpperCase()) {
@@ -179,6 +209,13 @@ export default function InventoryScreen() {
   return (
     <SafeAreaView style={styles.container} edges={['top']}>
       <Header title="Inventory & Forecast" />
+
+      {isUsingCached ? (
+        <View style={styles.cachedBanner}>
+          <MaterialIcons name="cloud-off" size={14} color="#B45309" />
+          <Text style={styles.cachedBannerText}>showing last data</Text>
+        </View>
+      ) : null}
 
       <ScrollView
         contentContainerStyle={styles.scrollContent}
@@ -644,4 +681,19 @@ const styles = StyleSheet.create({
     marginTop: spacing.md,
   },
   submitBtnText: { fontFamily: typography.fontFamily.bold, fontSize: typography.fontSize.xs, color: colors.white, letterSpacing: 0.5 },
+  cachedBanner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#FEF3C7',
+    paddingVertical: spacing.xs,
+    gap: spacing.xs,
+    borderBottomWidth: 1,
+    borderBottomColor: '#F59E0B',
+  },
+  cachedBannerText: {
+    fontFamily: typography.fontFamily.medium,
+    fontSize: 12,
+    color: '#B45309',
+  },
 });

@@ -17,6 +17,8 @@ import Header from '../components/Header';
 import { useApp } from '../context/AppContext';
 import { colors, spacing, radius, typography } from '../theme';
 import { BACKEND_URL } from '../config';
+import AsyncStorage from '@react-native-async-storage/async-storage';
+import { useSyncQueue } from '../context/SyncContext';
 
 interface CargoItem {
   id: number;
@@ -43,8 +45,10 @@ interface OptimizationResult {
 
 export default function CargoScreen() {
   const router = useRouter();
-  const { token, user } = useApp();
+  const { token, user, syncStatus } = useApp();
+  const { addToQueue } = useSyncQueue();
   const [cargoList, setCargoList] = useState<CargoItem[]>([]);
+  const [isUsingCached, setIsUsingCached] = useState<boolean>(false);
   const [loading, setLoading] = useState<boolean>(true);
   const [showAddModal, setShowAddModal] = useState<boolean>(false);
   const [submitting, setSubmitting] = useState<boolean>(false);
@@ -71,9 +75,18 @@ export default function CargoScreen() {
       if (res.ok) {
         const data = await res.json();
         setCargoList(data);
+        setIsUsingCached(false);
+        AsyncStorage.setItem('@polarops_cache_cargo', JSON.stringify(data));
+      } else {
+        throw new Error('Network error');
       }
     } catch (e) {
-      console.log('Error fetching cargo:', e);
+      console.log('Loading cargo from AsyncStorage cache:', e);
+      const cached = await AsyncStorage.getItem('@polarops_cache_cargo');
+      if (cached) {
+        setCargoList(JSON.parse(cached));
+        setIsUsingCached(true);
+      }
     } finally {
       setLoading(false);
     }
@@ -111,10 +124,10 @@ export default function CargoScreen() {
         throw new Error(errData.detail || `HTTP status ${res.status}`);
       }
 
-      const data: OptimizationResult = await res.json();
-      setOptResult(data);
+      const result: OptimizationResult = await res.json();
+      setOptResult(result);
     } catch (err: any) {
-      Alert.alert('Optimization Error', err.message || 'Failed to optimize cargo loading.');
+      Alert.alert('Optimizer Error', err.message || 'Failed to run knapsack optimizer.');
     } finally {
       setOptimizing(false);
     }
@@ -127,6 +140,23 @@ export default function CargoScreen() {
     }
 
     setSubmitting(true);
+    const cargoPayload = {
+      shipment_code: shipmentCode.trim() || `CARGO-${Date.now()}`,
+      title: title.trim(),
+      weight_kg: parseFloat(weightKg) || 0,
+      volume_m3: parseFloat(volumeM3) || 0,
+      priority: priority.trim(),
+      status: status.trim(),
+    };
+
+    if (syncStatus === 'Offline') {
+      await addToQueue('cargo_create', cargoPayload, 1, '/cargo', 'POST');
+      Alert.alert('Saved to Queue', 'Cargo item saved on device. It will be synced when connected.');
+      setShowAddModal(false);
+      setSubmitting(false);
+      return;
+    }
+
     try {
       const res = await fetch(`${BACKEND_URL}/cargo`, {
         method: 'POST',
@@ -134,14 +164,7 @@ export default function CargoScreen() {
           'Content-Type': 'application/json',
           Authorization: `Bearer ${token}`,
         },
-        body: JSON.stringify({
-          shipment_code: shipmentCode.trim() || `CARGO-${Date.now()}`,
-          title: title.trim(),
-          weight_kg: parseFloat(weightKg) || 0,
-          volume_m3: parseFloat(volumeM3) || 0,
-          priority: priority.trim(),
-          status: status.trim(),
-        }),
+        body: JSON.stringify(cargoPayload),
       });
 
       if (!res.ok) {
@@ -156,7 +179,10 @@ export default function CargoScreen() {
         handleOptimize();
       }
     } catch (err: any) {
-      Alert.alert('Error', err.message || 'Failed to add cargo.');
+      console.log('Network error adding cargo, saving to queue:', err);
+      await addToQueue('cargo_create', cargoPayload, 1, '/cargo', 'POST');
+      Alert.alert('Saved to Queue', 'Cargo item saved on device. It will be synced when connected.');
+      setShowAddModal(false);
     } finally {
       setSubmitting(false);
     }
