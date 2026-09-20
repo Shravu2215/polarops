@@ -280,34 +280,16 @@ export default function LoginScreen() {
                   </View>
                 </View>
 
-                {/* Role Selector */}
-                <Text style={styles.inputLabel}>Select Your Role</Text>
-                <View style={styles.roleGrid}>
-                  {[
-                    'Expedition Leader',
-                    'Logistics Officer',
-                    'Base Admin',
-                    'Team Member',
-                  ].map((role) => (
-                    <TouchableOpacity
-                      key={role}
-                      style={[
-                        styles.roleOption,
-                        regRole === role && styles.roleOptionActive,
-                      ]}
-                      onPress={() => setRegRole(role)}
-                    >
-                      <Text
-                        style={[
-                          styles.roleOptionText,
-                          regRole === role && styles.roleOptionTextActive,
-                        ]}
-                      >
-                        {role}
-                      </Text>
-                    </TouchableOpacity>
-                  ))}
+                {/* Security Note on Assigned Role */}
+                <View style={styles.roleNoteCard}>
+                  <MaterialIcons name="security" size={16} color={colors.primary} />
+                  <Text style={styles.roleNoteText}>
+                    Account Role: <Text style={{ fontFamily: typography.fontFamily.bold }}>Team Member</Text>
+                  </Text>
                 </View>
+                <Text style={styles.roleSubNote}>
+                  New registrations are created as Team Member. Leadership & Officer roles are provisioned by station authority.
+                </Text>
 
                 {/* Station Selector */}
                 <Text style={styles.inputLabel}>Assigned Research Station</Text>
@@ -494,33 +476,28 @@ const styles = StyleSheet.create({
     fontSize: typography.fontSize.sm,
     color: colors.text,
   },
-  roleGrid: {
+  roleNoteCard: {
     flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: 6,
-  },
-  roleOption: {
-    width: '48%',
-    paddingVertical: spacing.xs + 2,
-    paddingHorizontal: spacing.xs,
-    borderRadius: radius.button,
-    borderWidth: 1,
-    borderColor: colors.cardBorder,
-    backgroundColor: colors.background,
     alignItems: 'center',
-  },
-  roleOptionActive: {
     backgroundColor: colors.primaryIce,
-    borderColor: colors.primary,
+    borderColor: colors.cardBorder,
+    borderWidth: 1,
+    borderRadius: radius.button,
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.xs + 2,
+    gap: spacing.xs,
+    marginTop: spacing.xs,
   },
-  roleOptionText: {
+  roleNoteText: {
     fontFamily: typography.fontFamily.medium,
-    fontSize: 11,
-    color: colors.secondaryText,
-  },
-  roleOptionTextActive: {
-    fontFamily: typography.fontFamily.bold,
+    fontSize: 12,
     color: colors.primary,
+  },
+  roleSubNote: {
+    fontFamily: typography.fontFamily.regular,
+    fontSize: 10,
+    color: colors.secondaryText,
+    marginBottom: spacing.xs,
   },
   stationRow: {
     flexDirection: 'row',
