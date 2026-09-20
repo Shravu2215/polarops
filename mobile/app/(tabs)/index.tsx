@@ -76,15 +76,31 @@ export default function HomeScreen() {
       setData(result);
       setIsOfflineData(false);
 
-      // Cache summary in AsyncStorage
-      await AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(result));
+      // Cache summary in AsyncStorage safely
+      try {
+        await AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(result));
+      } catch (cacheErr) {
+        console.log('AsyncStorage setItem unavailable:', cacheErr);
+      }
     } catch (err) {
       console.log('Failed to fetch summary from server, loading cache:', err);
-      const cached = await AsyncStorage.getItem(STORAGE_KEY);
+      let cached: string | null = null;
+      try {
+        cached = await AsyncStorage.getItem(STORAGE_KEY);
+      } catch (storageErr) {
+        console.log('AsyncStorage getItem unavailable:', storageErr);
+      }
+
       if (cached) {
-        setData(JSON.parse(cached));
-        setIsOfflineData(true);
-      } else {
+        try {
+          setData(JSON.parse(cached));
+          setIsOfflineData(true);
+        } catch (parseErr) {
+          console.log('Failed to parse cached summary:', parseErr);
+        }
+      }
+      
+      if (!cached) {
         setData({
           survival_days: null,
           active_expeditions: 0,
