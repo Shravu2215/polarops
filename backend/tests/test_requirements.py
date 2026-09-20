@@ -9,8 +9,8 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 # Set SQLite dev test DB
 os.environ["USE_SQLITE"] = "true"
 os.environ["ADMIN_EMAIL"] = "leader@polarops.in"
-os.environ["ADMIN_PASSWORD"] = "polarops_leader_secure_pass_2026"
-os.environ["JWT_SECRET"] = "polarops_super_secret_jwt_key_antarctica_2026"
+os.environ["ADMIN_PASSWORD"] = "test_suite_leader_password_2026"
+os.environ["JWT_SECRET"] = "test_suite_jwt_secret_key_2026_x9k2m7"
 
 from fastapi.testclient import TestClient
 from main import app
@@ -42,7 +42,7 @@ class TestRequirementsSuite(unittest.TestCase):
         leader = models.User(
             username="leader",
             email="leader@polarops.in",
-            hashed_password=hash_password("polarops_leader_secure_pass_2026"),
+            hashed_password=hash_password("test_suite_leader_password_2026"),
             role="Expedition Leader",
             station_name="Maitri"
         )
@@ -50,7 +50,7 @@ class TestRequirementsSuite(unittest.TestCase):
         db.commit()
 
         # Obtain Leader Token
-        resp = self.client.post("/auth/login", json={"email": "leader@polarops.in", "password": "polarops_leader_secure_pass_2026"})
+        resp = self.client.post("/auth/login", json={"email": "leader@polarops.in", "password": "test_suite_leader_password_2026"})
         self.assertEqual(resp.status_code, 200)
         self.leader_token = resp.json()["access_token"]
         self.leader_headers = {"Authorization": f"Bearer {self.leader_token}"}
