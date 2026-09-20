@@ -76,31 +76,16 @@ export default function HomeScreen() {
       setData(result);
       setIsOfflineData(false);
 
-      // Cache summary in AsyncStorage safely
-      try {
-        await AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(result));
-      } catch (cacheErr) {
-        console.log('AsyncStorage setItem unavailable:', cacheErr);
-      }
+      // Cache summary in AsyncStorage
+      await AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(result));
     } catch (err) {
       console.log('Failed to fetch summary from server, loading cache:', err);
-      let cached: string | null = null;
-      try {
-        cached = await AsyncStorage.getItem(STORAGE_KEY);
-      } catch (storageErr) {
-        console.log('AsyncStorage getItem unavailable:', storageErr);
-      }
+      const cached = await AsyncStorage.getItem(STORAGE_KEY);
 
       if (cached) {
-        try {
-          setData(JSON.parse(cached));
-          setIsOfflineData(true);
-        } catch (parseErr) {
-          console.log('Failed to parse cached summary:', parseErr);
-        }
-      }
-      
-      if (!cached) {
+        setData(JSON.parse(cached));
+        setIsOfflineData(true);
+      } else {
         setData({
           survival_days: null,
           active_expeditions: 0,
@@ -174,7 +159,7 @@ export default function HomeScreen() {
           <View style={styles.offlineNoteCard}>
             <MaterialIcons name="cloud-off" size={16} color={colors.secondaryText} />
             <Text style={styles.offlineNoteText}>
-              Offline — Showing last cached data
+              Offline, showing last data
             </Text>
           </View>
         ) : null}

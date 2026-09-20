@@ -7,8 +7,9 @@ from fastapi.security import OAuth2PasswordBearer
 from sqlalchemy.orm import Session
 from database import get_db
 import models
+import config
 
-SECRET_KEY = os.getenv("SECRET_KEY", "polarops-secret-key-antarctica-2026")
+SECRET_KEY = config.JWT_SECRET
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24  # 24 hours
 
@@ -50,4 +51,20 @@ def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(
     user = db.query(models.User).filter(models.User.username == username).first()
     if user is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+    return user
+
+def require_leader(user: models.User = Depends(get_current_user)) -> models.User:
+    if user.role != "Expedition Leader":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Forbidden: Only Expedition Leader can perform this action"
+        )
+    return user
+
+def require_write_role(user: models.User = Depends(get_current_user)) -> models.User:
+    if user.role == "Team Member":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Forbidden: Team Members cannot perform write or create operations"
+        )
     return user

@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Float, DateTime
+from sqlalchemy import Column, Integer, String, Float, DateTime, JSON
 from datetime import datetime
 from database import Base
 
@@ -11,7 +11,9 @@ class User(Base):
     hashed_password = Column(String, nullable=False)
     role = Column(String, nullable=False)  # Expedition Leader, Logistics Officer, Base Admin, Team Member
     station_name = Column(String, nullable=True)  # Maitri, Bharati
+    skills = Column(JSON, default=list)  # ["doctor", "mechanic", "pilot", "engineer"]
     latitude = Column(Float, nullable=True)
     longitude = Column(Float, nullable=True)
     last_location_update = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
+

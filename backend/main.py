@@ -16,6 +16,8 @@ from auth_utils import (
     verify_password,
     create_access_token,
     get_current_user,
+    require_leader,
+    require_write_role,
 )
 from weather_service import fetch_real_weather
 import config
@@ -157,6 +159,9 @@ class RegisterRequest(BaseModel):
     station_name: Optional[str] = "Maitri"
     skills: Optional[List[str]] = []
 
+class UpdateRoleRequest(BaseModel):
+    role: str
+
 # --- Real Auth & User Management Routes ---
 @app.post("/auth/register")
 def register_user(req: RegisterRequest, db: Session = Depends(get_db)):
@@ -172,13 +177,18 @@ def register_user(req: RegisterRequest, db: Session = Depends(get_db)):
             detail="Username or email is already registered."
         )
 
+    # Requirement 1: Security - POST /auth/register MUST ALWAYS create a Team Member. Ignore client-provided role.
+    assigned_role = "Team Member"
+    user_skills = req.skills if (req.skills and len(req.skills) > 0) else []
+
     hashed_pw = hash_password(req.password)
     new_user = models.User(
         username=clean_username,
         email=clean_email,
         hashed_password=hashed_pw,
-        role=req.role or "Team Member",
-        station_name=req.station_name or "Maitri"
+        role=assigned_role,
+        station_name=req.station_name or "Maitri",
+        skills=user_skills
     )
     db.add(new_user)
     db.commit()
@@ -187,8 +197,6 @@ def register_user(req: RegisterRequest, db: Session = Depends(get_db)):
     # Sync a Person record for location/dispatching
     initial_lat = -70.7660 if new_user.station_name == "Maitri" else -69.4070
     initial_lon = 11.7330 if new_user.station_name == "Maitri" else 76.1910
-    default_skill = (req.role or "Member").lower().split(' ')[0]
-    user_skills = req.skills if (req.skills and len(req.skills) > 0) else [default_skill]
 
     person = models.Person(
         name=clean_username.capitalize(),
@@ -270,19 +278,30 @@ def login(req: LoginRequest, db: Session = Depends(get_db)):
         }
     }
 
+@app.get("/users")
+def get_users(current_user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
+    users = db.query(models.User).order_by(models.User.id.asc()).all()
+    return [
+        {
+            "id": u.id,
+            "username": u.username,
+            "email": u.email,
+            "role": u.role,
+            "station_name": u.station_name,
+            "skills": u.skills or [],
+            "latitude": u.latitude,
+            "longitude": u.longitude,
+            "last_location_update": u.last_location_update.isoformat() if u.last_location_update else None
+        }
+        for u in users
+    ]
 
 @app.post("/users")
 def create_user(
     req: CreateUserRequest,
-    current_user: models.User = Depends(get_current_user),
+    current_user: models.User = Depends(require_leader),
     db: Session = Depends(get_db)
 ):
-    if current_user.role != "Expedition Leader":
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Only Expedition Leader can provision new user accounts"
-        )
-
     existing = db.query(models.User).filter(
         (models.User.username == req.username) | (models.User.email == req.email)
     ).first()
@@ -297,7 +316,8 @@ def create_user(
         email=req.email,
         hashed_password=hash_password(req.password),
         role=req.role,
-        station_name=req.station_name
+        station_name=req.station_name,
+        skills=req.skills or []
     )
     db.add(new_user)
     db.commit()
@@ -338,6 +358,27 @@ def create_user(
     db.commit()
 
     return {"message": "User account created successfully", "user_id": new_user.id}
+
+@app.patch("/users/{user_id}/role")
+def update_user_role(
+    user_id: int,
+    req: UpdateRoleRequest,
+    current_user: models.User = Depends(require_leader),
+    db: Session = Depends(get_db)
+):
+    target_user = db.query(models.User).filter(models.User.id == user_id).first()
+    if not target_user:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+
+    target_user.role = req.role
+
+    # Sync to Person record
+    person = db.query(models.Person).filter(models.Person.user_id == target_user.id).first()
+    if person:
+        person.role = req.role
+
+    db.commit()
+    return {"message": "User role updated successfully", "user_id": target_user.id, "new_role": req.role}
 
 @app.patch("/me/location")
 def update_user_location(
@@ -394,7 +435,7 @@ def update_user_profile(
 @app.post("/expeditions")
 def create_expedition(
     req: CreateExpeditionRequest,
-    current_user: models.User = Depends(get_current_user),
+    current_user: models.User = Depends(require_write_role),
     db: Session = Depends(get_db)
 ):
     if req.status == "Active":
@@ -445,14 +486,14 @@ def create_expedition(
     }
 
 @app.get("/expeditions")
-def get_expeditions(db: Session = Depends(get_db)):
+def get_expeditions(current_user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
     return db.query(models.Expedition).order_by(models.Expedition.id.desc()).all()
 
 # --- Inventory CRUD ---
 @app.post("/inventory")
 def create_inventory_item(
     req: CreateInventoryItemRequest,
-    current_user: models.User = Depends(get_current_user),
+    current_user: models.User = Depends(require_write_role),
     db: Session = Depends(get_db)
 ):
     item = models.InventoryItem(
@@ -500,14 +541,14 @@ def create_inventory_item(
     }
 
 @app.get("/inventory")
-def get_inventory(db: Session = Depends(get_db)):
+def get_inventory(current_user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
     return db.query(models.InventoryItem).order_by(models.InventoryItem.id.asc()).all()
 
 # --- Cargo CRUD ---
 @app.post("/cargo")
 def create_cargo(
     req: CreateCargoRequest,
-    current_user: models.User = Depends(get_current_user),
+    current_user: models.User = Depends(require_write_role),
     db: Session = Depends(get_db)
 ):
     cargo = models.CargoShipment(
@@ -533,14 +574,14 @@ def create_cargo(
     }
 
 @app.get("/cargo")
-def get_cargo(db: Session = Depends(get_db)):
+def get_cargo(current_user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
     return db.query(models.CargoShipment).order_by(models.CargoShipment.id.desc()).all()
 
 # --- Vehicles CRUD ---
 @app.post("/vehicles")
 def create_vehicle(
     req: CreateVehicleRequest,
-    current_user: models.User = Depends(get_current_user),
+    current_user: models.User = Depends(require_write_role),
     db: Session = Depends(get_db)
 ):
     v = models.Vehicle(
@@ -568,17 +609,17 @@ def create_vehicle(
 
 
 @app.get("/vehicles")
-def get_vehicles(db: Session = Depends(get_db)):
+def get_vehicles(current_user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
     return db.query(models.Vehicle).all()
 
 # --- People Route ---
 @app.get("/people")
-def get_people(db: Session = Depends(get_db)):
+def get_people(current_user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
     return db.query(models.Person).all()
 
 # --- Alerts Route ---
 @app.get("/alerts")
-def get_alerts(db: Session = Depends(get_db)):
+def get_alerts(current_user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
     return db.query(models.Alert).order_by(models.Alert.created_at.desc()).all()
 
 # --- Real SOS Dispatch Route with 10-Min Location Freshness Filter ---
@@ -694,7 +735,7 @@ def trigger_sos(
 
 # --- Strict DB-Computed Dashboard Summary Route ---
 @app.get("/dashboard/summary")
-async def get_dashboard_summary(db: Session = Depends(get_db)):
+async def get_dashboard_summary(current_user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
     active_exp = db.query(models.Expedition).filter(models.Expedition.status == "Active").first()
     
     # 1. Survival Days computed ONLY from active station's Fuel & Ration items

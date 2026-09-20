@@ -170,7 +170,7 @@ export default function MoreScreen() {
         </View>
 
         {/* Action Buttons for Data Entry */}
-        <Text style={styles.sectionHeader}>Station Entry Forms</Text>
+        <Text style={styles.sectionHeader}>Station Entry & Resource Forms</Text>
         <View style={styles.formButtonGrid}>
           <TouchableOpacity
             style={styles.formButton}
@@ -190,16 +190,32 @@ export default function MoreScreen() {
             <Text style={styles.formButtonSub}>Fuel, Rations, Spares</Text>
           </TouchableOpacity>
 
-          {user?.role === 'Expedition Leader' ? (
-            <TouchableOpacity
-              style={styles.formButton}
-              onPress={() => setShowUserModal(true)}
-            >
-              <MaterialIcons name="person-add" size={24} color={colors.okGreen} />
-              <Text style={styles.formButtonTitle}>Provision User Account</Text>
-              <Text style={styles.formButtonSub}>Leader role management</Text>
-            </TouchableOpacity>
-          ) : null}
+          <TouchableOpacity
+            style={styles.formButton}
+            onPress={() => router.push('/vehicles')}
+          >
+            <MaterialIcons name="directions-car" size={24} color={colors.primary} />
+            <Text style={styles.formButtonTitle}>Vehicles & Fleet</Text>
+            <Text style={styles.formButtonSub}>Manage Sno-Cats, copters & limits</Text>
+          </TouchableOpacity>
+
+          <TouchableOpacity
+            style={styles.formButton}
+            onPress={() => router.push('/cargo')}
+          >
+            <MaterialIcons name="local-shipping" size={24} color={colors.accentOrange} />
+            <Text style={styles.formButtonTitle}>Cargo Manifest</Text>
+            <Text style={styles.formButtonSub}>Track weight, volume & priority</Text>
+          </TouchableOpacity>
+
+          <TouchableOpacity
+            style={styles.formButton}
+            onPress={() => router.push('/users')}
+          >
+            <MaterialIcons name="people" size={24} color={colors.okGreen} />
+            <Text style={styles.formButtonTitle}>Personnel & Roles</Text>
+            <Text style={styles.formButtonSub}>View team, skills & role management</Text>
+          </TouchableOpacity>
         </View>
 
         {/* Module Shortcuts */}

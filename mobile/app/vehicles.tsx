@@ -19,73 +19,76 @@ import { useApp } from '../context/AppContext';
 import { colors, spacing, radius, typography } from '../theme';
 import { BACKEND_URL } from '../config';
 
-interface CargoItem {
+interface Vehicle {
   id: number;
-  shipment_code: string;
-  title: string;
-  weight_kg: number;
-  volume_m3: number;
-  priority: string;
+  name: string;
+  type: string;
+  latitude: number;
+  longitude: number;
   status: string;
+  weather_limit: string;
+  station_name: string;
 }
 
-export default function CargoScreen() {
+export default function VehiclesScreen() {
   const router = useRouter();
   const { token, user } = useApp();
-  const [cargoList, setCargoList] = useState<CargoItem[]>([]);
+  const [vehicles, setVehicles] = useState<Vehicle[]>([]);
   const [loading, setLoading] = useState<boolean>(true);
   const [showAddModal, setShowAddModal] = useState<boolean>(false);
   const [submitting, setSubmitting] = useState<boolean>(false);
 
   // Form State
-  const [title, setTitle] = useState<string>('Medical Supplies Box 1');
-  const [shipmentCode, setShipmentCode] = useState<string>('CARGO-2026-01');
-  const [weightKg, setWeightKg] = useState<string>('150');
-  const [volumeM3, setVolumeM3] = useState<string>('1.2');
-  const [priority, setPriority] = useState<string>('High');
-  const [status, setStatus] = useState<string>('Pending');
+  const [name, setName] = useState<string>('Sno-Cat Alpha');
+  const [type, setType] = useState<string>('Sno-Cat');
+  const [stationName, setStationName] = useState<string>('Maitri');
+  const [status, setStatus] = useState<string>('Available');
+  const [weatherLimit, setWeatherLimit] = useState<string>('80 km/h');
+  const [lat, setLat] = useState<string>('-70.7660');
+  const [lon, setLon] = useState<string>('11.7330');
 
-  const fetchCargo = async () => {
+  const fetchVehicles = async () => {
     try {
-      const res = await fetch(`${BACKEND_URL}/cargo`, {
+      const res = await fetch(`${BACKEND_URL}/vehicles`, {
         headers: { Authorization: `Bearer ${token}` },
       });
       if (res.ok) {
         const data = await res.json();
-        setCargoList(data);
+        setVehicles(data);
       }
     } catch (e) {
-      console.log('Error fetching cargo:', e);
+      console.log('Error fetching vehicles:', e);
     } finally {
       setLoading(false);
     }
   };
 
   useEffect(() => {
-    fetchCargo();
+    fetchVehicles();
   }, []);
 
-  const handleAddCargo = async () => {
-    if (!title.trim()) {
-      Alert.alert('Validation Error', 'Cargo title is required.');
+  const handleAddVehicle = async () => {
+    if (!name.trim()) {
+      Alert.alert('Validation Error', 'Vehicle name is required.');
       return;
     }
 
     setSubmitting(true);
     try {
-      const res = await fetch(`${BACKEND_URL}/cargo`, {
+      const res = await fetch(`${BACKEND_URL}/vehicles`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
           Authorization: `Bearer ${token}`,
         },
         body: JSON.stringify({
-          shipment_code: shipmentCode.trim() || `CARGO-${Date.now()}`,
-          title: title.trim(),
-          weight_kg: parseFloat(weightKg) || 0,
-          volume_m3: parseFloat(volumeM3) || 0,
-          priority: priority.trim(),
+          name: name.trim(),
+          type: type.trim(),
+          station_name: stationName.trim(),
           status: status.trim(),
+          weather_limit: weatherLimit.trim(),
+          latitude: parseFloat(lat) || -70.766,
+          longitude: parseFloat(lon) || 11.733,
         }),
       });
 
@@ -94,11 +97,11 @@ export default function CargoScreen() {
         throw new Error(errData.detail || `HTTP status ${res.status}`);
       }
 
-      Alert.alert('Success', 'Cargo shipment added to manifest!');
+      Alert.alert('Success', 'Vehicle added to station fleet!');
       setShowAddModal(false);
-      fetchCargo();
+      fetchVehicles();
     } catch (err: any) {
-      Alert.alert('Error', err.message || 'Failed to add cargo.');
+      Alert.alert('Error', err.message || 'Failed to add vehicle.');
     } finally {
       setSubmitting(false);
     }
@@ -108,7 +111,7 @@ export default function CargoScreen() {
 
   return (
     <SafeAreaView style={styles.container} edges={['top']}>
-      <Header title="Cargo Manifest" />
+      <Header title="Fleet & Vehicles" />
 
       <View style={styles.topBar}>
         <TouchableOpacity style={styles.backBtn} onPress={() => router.back()}>
@@ -119,7 +122,7 @@ export default function CargoScreen() {
         {isWriteAllowed ? (
           <TouchableOpacity style={styles.addBtn} onPress={() => setShowAddModal(true)}>
             <MaterialIcons name="add" size={18} color={colors.white} />
-            <Text style={styles.addBtnText}>Add Cargo</Text>
+            <Text style={styles.addBtnText}>Add Vehicle</Text>
           </TouchableOpacity>
         ) : null}
       </View>
@@ -128,73 +131,101 @@ export default function CargoScreen() {
         <ActivityIndicator size="large" color={colors.primary} style={{ marginTop: 40 }} />
       ) : (
         <FlatList
-          data={cargoList}
+          data={vehicles}
           keyExtractor={(item) => item.id.toString()}
           contentContainerStyle={styles.listContent}
           renderItem={({ item }) => (
             <View style={styles.card}>
               <View style={styles.cardHeader}>
                 <View style={{ flex: 1 }}>
-                  <Text style={styles.cargoTitle}>{item.title}</Text>
-                  <Text style={styles.cargoCode}>{item.shipment_code}</Text>
+                  <Text style={styles.vehicleName}>{item.name}</Text>
+                  <Text style={styles.vehicleType}>{item.type} • {item.station_name}</Text>
                 </View>
-                <View style={styles.priorityBadge}>
-                  <Text style={styles.priorityText}>{item.priority}</Text>
+                <View
+                  style={[
+                    styles.statusBadge,
+                    {
+                      backgroundColor:
+                        item.status === 'Available'
+                          ? colors.okGreen + '20'
+                          : item.status === 'Dispatched'
+                          ? colors.accentOrange + '20'
+                          : colors.warningAmber + '20',
+                    },
+                  ]}
+                >
+                  <Text
+                    style={[
+                      styles.statusText,
+                      {
+                        color:
+                          item.status === 'Available'
+                            ? colors.okGreen
+                            : item.status === 'Dispatched'
+                            ? colors.accentOrange
+                            : colors.warningAmber,
+                      },
+                    ]}
+                  >
+                    {item.status}
+                  </Text>
                 </View>
               </View>
 
               <View style={styles.detailRow}>
-                <Text style={styles.detailLabel}>Weight & Volume:</Text>
-                <Text style={styles.detailVal}>{item.weight_kg} kg • {item.volume_m3} m³</Text>
+                <Text style={styles.detailLabel}>Weather Limit:</Text>
+                <Text style={styles.detailVal}>{item.weather_limit}</Text>
               </View>
               <View style={styles.detailRow}>
-                <Text style={styles.detailLabel}>Status:</Text>
-                <Text style={styles.detailVal}>{item.status}</Text>
+                <Text style={styles.detailLabel}>Location:</Text>
+                <Text style={styles.detailVal}>
+                  ({item.latitude.toFixed(4)}, {item.longitude.toFixed(4)})
+                </Text>
               </View>
             </View>
           )}
           ListEmptyComponent={
-            <Text style={styles.emptyText}>No cargo shipments registered in manifest.</Text>
+            <Text style={styles.emptyText}>No vehicles currently registered in fleet.</Text>
           }
         />
       )}
 
-      {/* Add Cargo Modal */}
+      {/* Add Vehicle Modal */}
       <Modal visible={showAddModal} animationType="slide" transparent>
         <View style={styles.modalOverlay}>
           <ScrollView contentContainerStyle={styles.modalCard}>
             <View style={styles.modalHeader}>
-              <Text style={styles.modalTitle}>Add Cargo Shipment</Text>
+              <Text style={styles.modalTitle}>Add Fleet Vehicle</Text>
               <TouchableOpacity onPress={() => setShowAddModal(false)}>
                 <MaterialIcons name="close" size={24} color={colors.text} />
               </TouchableOpacity>
             </View>
 
-            <Text style={styles.fieldLabel}>Cargo Title / Description</Text>
-            <TextInput style={styles.input} value={title} onChangeText={setTitle} placeholder="e.g. Medical Supplies Box 1" />
+            <Text style={styles.fieldLabel}>Vehicle Name</Text>
+            <TextInput style={styles.input} value={name} onChangeText={setName} placeholder="e.g. Sno-Cat Alpha" />
 
-            <Text style={styles.fieldLabel}>Shipment Code</Text>
-            <TextInput style={styles.input} value={shipmentCode} onChangeText={setShipmentCode} placeholder="CARGO-2026-01" />
+            <Text style={styles.fieldLabel}>Type (Sno-Cat, Helicopter, Quad)</Text>
+            <TextInput style={styles.input} value={type} onChangeText={setType} />
+
+            <Text style={styles.fieldLabel}>Station Name</Text>
+            <TextInput style={styles.input} value={stationName} onChangeText={setStationName} />
+
+            <Text style={styles.fieldLabel}>Weather Limit</Text>
+            <TextInput style={styles.input} value={weatherLimit} onChangeText={setWeatherLimit} placeholder="e.g. 80 km/h" />
 
             <View style={{ flexDirection: 'row', gap: 8 }}>
               <View style={{ flex: 1 }}>
-                <Text style={styles.fieldLabel}>Weight (kg)</Text>
-                <TextInput style={styles.input} value={weightKg} onChangeText={setWeightKg} keyboardType="numeric" />
+                <Text style={styles.fieldLabel}>Latitude</Text>
+                <TextInput style={styles.input} value={lat} onChangeText={setLat} keyboardType="numeric" />
               </View>
               <View style={{ flex: 1 }}>
-                <Text style={styles.fieldLabel}>Volume (m³)</Text>
-                <TextInput style={styles.input} value={volumeM3} onChangeText={setVolumeM3} keyboardType="numeric" />
+                <Text style={styles.fieldLabel}>Longitude</Text>
+                <TextInput style={styles.input} value={lon} onChangeText={setLon} keyboardType="numeric" />
               </View>
             </View>
 
-            <Text style={styles.fieldLabel}>Priority (Critical, High, Medium, Low)</Text>
-            <TextInput style={styles.input} value={priority} onChangeText={setPriority} />
-
-            <Text style={styles.fieldLabel}>Status (Pending, In-Transit, Delivered)</Text>
-            <TextInput style={styles.input} value={status} onChangeText={setStatus} />
-
-            <TouchableOpacity style={styles.submitBtn} onPress={handleAddCargo} disabled={submitting}>
-              {submitting ? <ActivityIndicator color={colors.white} /> : <Text style={styles.submitBtnText}>ADD TO MANIFEST</Text>}
+            <TouchableOpacity style={styles.submitBtn} onPress={handleAddVehicle} disabled={submitting}>
+              {submitting ? <ActivityIndicator color={colors.white} /> : <Text style={styles.submitBtnText}>SAVE VEHICLE</Text>}
             </TouchableOpacity>
           </ScrollView>
         </View>
@@ -234,10 +265,10 @@ const styles = StyleSheet.create({
     gap: spacing.xs,
   },
   cardHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
-  cargoTitle: { fontFamily: typography.fontFamily.bold, fontSize: typography.fontSize.base, color: colors.text },
-  cargoCode: { fontFamily: typography.fontFamily.regular, fontSize: typography.fontSize.xs, color: colors.secondaryText },
-  priorityBadge: { backgroundColor: colors.accentOrange + '20', paddingHorizontal: 8, paddingVertical: 4, borderRadius: 12 },
-  priorityText: { fontFamily: typography.fontFamily.bold, fontSize: 11, color: colors.accentOrange },
+  vehicleName: { fontFamily: typography.fontFamily.bold, fontSize: typography.fontSize.base, color: colors.text },
+  vehicleType: { fontFamily: typography.fontFamily.regular, fontSize: typography.fontSize.xs, color: colors.secondaryText },
+  statusBadge: { paddingHorizontal: 8, paddingVertical: 4, borderRadius: 12 },
+  statusText: { fontFamily: typography.fontFamily.bold, fontSize: 11 },
   detailRow: { flexDirection: 'row', justifyContent: 'space-between', marginTop: 2 },
   detailLabel: { fontFamily: typography.fontFamily.regular, fontSize: typography.fontSize.xs, color: colors.secondaryText },
   detailVal: { fontFamily: typography.fontFamily.medium, fontSize: typography.fontSize.xs, color: colors.text },
