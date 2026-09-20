@@ -34,8 +34,14 @@ export default function LoginScreen() {
   const [regRole, setRegRole] = useState<string>('Team Member');
   const [regStation, setRegStation] = useState<string>('Maitri');
 
+  const [customUrl, setCustomUrl] = useState<string>(BACKEND_URL);
+  const [showUrlEdit, setShowUrlEdit] = useState<boolean>(false);
   const [loading, setLoading] = useState<boolean>(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+
+  const getApiUrl = () => customUrl.replace(/\/$/, '');
+
+
 
   const handleSignIn = async () => {
     if (!loginEmail.trim() || !loginPassword) {
@@ -46,7 +52,8 @@ export default function LoginScreen() {
     setLoading(true);
     setErrorMessage(null);
     try {
-      const response = await fetch(`${BACKEND_URL}/auth/login`, {
+      const response = await fetch(`${getApiUrl()}/auth/login`, {
+
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -88,7 +95,8 @@ export default function LoginScreen() {
     setLoading(true);
     setErrorMessage(null);
     try {
-      const response = await fetch(`${BACKEND_URL}/auth/register`, {
+      const response = await fetch(`${getApiUrl()}/auth/register`, {
+
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -343,12 +351,29 @@ export default function LoginScreen() {
               </View>
             )}
 
-            <View style={styles.configNotice}>
-              <MaterialIcons name="wifi" size={14} color={colors.secondaryText} />
+            <TouchableOpacity
+              style={styles.configNotice}
+              onPress={() => setShowUrlEdit(!showUrlEdit)}
+              activeOpacity={0.7}
+            >
+              <MaterialIcons name="wifi" size={14} color={colors.primary} />
               <Text style={styles.configNoticeText} numberOfLines={1}>
-                Target Backend: {BACKEND_URL}
+                Backend Server: {customUrl} (Tap to Edit)
               </Text>
-            </View>
+            </TouchableOpacity>
+
+            {showUrlEdit ? (
+              <View style={styles.urlEditWrapper}>
+                <Text style={styles.inputLabel}>Server Base URL (IP:Port)</Text>
+                <TextInput
+                  style={styles.textInputUrl}
+                  value={customUrl}
+                  onChangeText={setCustomUrl}
+                  autoCapitalize="none"
+                />
+              </View>
+            ) : null}
+
           </View>
         </ScrollView>
       </KeyboardAvoidingView>
@@ -547,8 +572,24 @@ const styles = StyleSheet.create({
     marginTop: spacing.xs,
   },
   configNoticeText: {
-    fontFamily: typography.fontFamily.regular,
-    fontSize: 10,
-    color: colors.secondaryText,
+    fontFamily: typography.fontFamily.medium,
+    fontSize: 11,
+    color: colors.primary,
   },
+  urlEditWrapper: {
+    gap: 4,
+    marginTop: spacing.xs,
+  },
+  textInputUrl: {
+    backgroundColor: colors.background,
+    borderWidth: 1,
+    borderColor: colors.primary,
+    borderRadius: radius.button,
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.xs,
+    fontFamily: typography.fontFamily.medium,
+    fontSize: 12,
+    color: colors.text,
+  },
+
 });
