@@ -13,6 +13,7 @@ import { useRouter } from 'expo-router';
 import { MaterialIcons } from '@expo/vector-icons';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import Header from '../../components/Header';
+import { useApp } from '../../context/AppContext';
 import { colors, spacing, radius, typography } from '../../theme';
 import { BACKEND_URL } from '../../config';
 
@@ -57,6 +58,7 @@ const STORAGE_KEY = '@polarops_dashboard_summary';
 
 export default function HomeScreen() {
   const router = useRouter();
+  const { token } = useApp();
   const [data, setData] = useState<DashboardSummary | null>(null);
   const [loading, setLoading] = useState<boolean>(true);
   const [refreshing, setRefreshing] = useState<boolean>(false);
@@ -64,9 +66,12 @@ export default function HomeScreen() {
 
   const fetchDashboardData = async () => {
     try {
-      const response = await fetch(`${BACKEND_URL}/dashboard/summary`, {
-        headers: { 'Content-Type': 'application/json' },
-      });
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+      if (token) {
+        headers['Authorization'] = `Bearer ${token}`;
+      }
+
+      const response = await fetch(`${BACKEND_URL}/dashboard/summary`, { headers });
 
       if (!response.ok) {
         throw new Error(`HTTP error ${response.status}`);
@@ -108,7 +113,7 @@ export default function HomeScreen() {
 
   useEffect(() => {
     fetchDashboardData();
-  }, []);
+  }, [token]);
 
   const onRefresh = () => {
     setRefreshing(true);
