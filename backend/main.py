@@ -738,15 +738,28 @@ def trigger_sos(
 async def get_dashboard_summary(current_user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
     active_exp = db.query(models.Expedition).filter(models.Expedition.status == "Active").first()
     
-    # 1. Survival Days computed ONLY from active station's Fuel & Ration items
     survival_days = None
     weather_data = None
+    exp_temp = -30.0  # Default Antarctic temperature fallback
     
     if active_exp:
         station_name = active_exp.station_name
         team_size = active_exp.target_team_size or 6
 
-        # Query items at station
+        exp_lat = getattr(active_exp, 'latitude', None) or (-70.7660 if station_name == "Maitri" else -69.4070)
+        exp_lon = getattr(active_exp, 'longitude', None) or (11.7330 if station_name == "Maitri" else 76.1910)
+
+        # 1. Fetch Real Live Weather from Open-Meteo
+        weather_data = await fetch_real_weather(
+            latitude=exp_lat,
+            longitude=exp_lon,
+            station_name=station_name
+        )
+
+        if weather_data and "temperature" in weather_data:
+            exp_temp = weather_data["temperature"]
+
+        # 2. Survival Days computed at REAL station weather temperature using cold_factor
         station_items = db.query(models.InventoryItem).filter(
             models.InventoryItem.location_station == station_name,
             models.InventoryItem.category.in_(["Fuel", "Ration"])
@@ -754,28 +767,13 @@ async def get_dashboard_summary(current_user: models.User = Depends(get_current_
 
         days_list = []
         for item in station_items:
-            daily_burn = team_size * item.daily_use_per_person
+            cf = calculate_cold_factor(exp_temp, item.cold_factor_sensitivity)
+            daily_burn = team_size * item.daily_use_per_person * cf
             if daily_burn > 0:
                 days_list.append(item.quantity / daily_burn)
 
         if days_list:
             survival_days = round(min(days_list), 1)
-
-        exp_lat = getattr(active_exp, 'latitude', None)
-        if exp_lat is None:
-            exp_lat = -70.7660 if active_exp.station_name == "Maitri" else -69.4070
-        
-        exp_lon = getattr(active_exp, 'longitude', None)
-        if exp_lon is None:
-            exp_lon = 11.7330 if active_exp.station_name == "Maitri" else 76.1910
-
-        # 2. Real Live Weather from Open-Meteo
-        weather_data = await fetch_real_weather(
-            latitude=exp_lat,
-            longitude=exp_lon,
-            station_name=station_name
-        )
-
 
     # 3. Personnel on Field: Count users/people with location update in the LAST 10 MINUTES
     cutoff_10m = datetime.now(timezone.utc) - timedelta(minutes=10)
@@ -807,6 +805,7 @@ async def get_dashboard_summary(current_user: models.User = Depends(get_current_
 
     return {
         "survival_days": survival_days,
+        "temperature_used": exp_temp,
         "active_expeditions": active_expeditions_count,
         "cargo_in_transit": cargo_in_transit_count,
         "personnel_on_field": personnel_on_field_count,
@@ -822,6 +821,9 @@ async def get_dashboard_summary(current_user: models.User = Depends(get_current_
 def verify_audit_log_chain(db: Session = Depends(get_db)):
     return verify_chain(db)
 
+# HEURISTIC CONFIGURATION NOTE:
+# calculate_cold_factor is a configurable operational heuristic (percent increase in burn rate
+# per degree C below freezing multiplied by item cold sensitivity), not an empirical physics measurement.
 def calculate_cold_factor(temperature_c: float, sensitivity: float = 1.0) -> float:
     """
     Calculates cold factor burn multiplier for Antarctic extreme weather.
@@ -906,4 +908,106 @@ async def get_supply_forecast(
         "station_name": station_name,
         "team_size": team_size,
         "items": forecast_items
+    }
+
+# --- Part 2: Cargo Loading Optimizer (Google OR-Tools CP-SAT) ---
+from ortools.sat.python import cp_model
+
+PRIORITY_WEIGHTS = {
+    "Critical": 10,
+    "High": 5,
+    "Medium": 2,
+    "Low": 1
+}
+
+class OptimizeCargoRequest(BaseModel):
+    capacity_weight_kg: float
+    capacity_volume_m3: float
+
+@app.post("/cargo/optimize")
+def optimize_cargo_loading(
+    req: OptimizeCargoRequest,
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    cargo_items = db.query(models.CargoShipment).filter(
+        models.CargoShipment.status.in_(["Pending", "Packed"])
+    ).all()
+
+    if not cargo_items:
+        return {
+            "status": "Optimal",
+            "packed_items": [],
+            "left_behind_items": [],
+            "total_weight_kg": 0.0,
+            "total_volume_m3": 0.0,
+            "capacity_weight_kg": req.capacity_weight_kg,
+            "capacity_volume_m3": req.capacity_volume_m3,
+            "weight_utilization_percent": 0.0,
+            "volume_utilization_percent": 0.0,
+            "total_priority_value": 0
+        }
+
+    # Build OR-Tools CP-SAT Knapsack Model (2 Constraints: Weight + Volume)
+    model = cp_model.CpModel()
+    SCALE = 100
+    weight_cap = int(round(req.capacity_weight_kg * SCALE))
+    vol_cap = int(round(req.capacity_volume_m3 * SCALE))
+
+    x = {}
+    for i, item in enumerate(cargo_items):
+        x[i] = model.NewBoolVar(f"x_{i}")
+
+    # Constraint 1: Weight limit
+    model.Add(sum(int(round(item.weight_kg * SCALE)) * x[i] for i, item in enumerate(cargo_items)) <= weight_cap)
+
+    # Constraint 2: Volume limit
+    model.Add(sum(int(round(item.volume_m3 * SCALE)) * x[i] for i, item in enumerate(cargo_items)) <= vol_cap)
+
+    # Objective: Maximize total priority value
+    model.Maximize(sum(PRIORITY_WEIGHTS.get(item.priority, 1) * x[i] for i, item in enumerate(cargo_items)))
+
+    solver = cp_model.CpSolver()
+    solver.parameters.max_time_in_seconds = 5.0
+    sol_status = solver.Solve(model)
+
+    packed_items = []
+    left_behind_items = []
+    total_weight = 0.0
+    total_volume = 0.0
+    total_priority = 0
+
+    for i, item in enumerate(cargo_items):
+        item_dict = {
+            "id": item.id,
+            "shipment_code": item.shipment_code,
+            "title": item.title,
+            "weight_kg": item.weight_kg,
+            "volume_m3": item.volume_m3,
+            "priority": item.priority,
+            "priority_value": PRIORITY_WEIGHTS.get(item.priority, 1),
+            "status": item.status
+        }
+        if sol_status in (cp_model.OPTIMAL, cp_model.FEASIBLE) and solver.Value(x[i]) == 1:
+            packed_items.append(item_dict)
+            total_weight += item.weight_kg
+            total_volume += item.volume_m3
+            total_priority += PRIORITY_WEIGHTS.get(item.priority, 1)
+        else:
+            left_behind_items.append(item_dict)
+
+    weight_util = round((total_weight / req.capacity_weight_kg * 100.0), 1) if req.capacity_weight_kg > 0 else 0.0
+    vol_util = round((total_volume / req.capacity_volume_m3 * 100.0), 1) if req.capacity_volume_m3 > 0 else 0.0
+
+    return {
+        "status": "Optimal" if sol_status == cp_model.OPTIMAL else "Feasible",
+        "packed_items": packed_items,
+        "left_behind_items": left_behind_items,
+        "total_weight_kg": round(total_weight, 1),
+        "total_volume_m3": round(total_volume, 1),
+        "capacity_weight_kg": req.capacity_weight_kg,
+        "capacity_volume_m3": req.capacity_volume_m3,
+        "weight_utilization_percent": min(100.0, weight_util),
+        "volume_utilization_percent": min(100.0, vol_util),
+        "total_priority_value": total_priority
     }

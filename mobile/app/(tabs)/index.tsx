@@ -43,6 +43,7 @@ interface WeatherData {
 
 interface DashboardSummary {
   survival_days: number | null;
+  temperature_used?: number | null;
   active_expeditions: number;
   cargo_in_transit: number;
   personnel_on_field: number;
@@ -200,6 +201,12 @@ export default function HomeScreen() {
                     Stock Operational ({data.team_size} Team Members)
                   </Text>
                 </View>
+
+                {data.temperature_used !== undefined && data.temperature_used !== null ? (
+                  <Text style={styles.tempSubText}>
+                    Calculated at {data.temperature_used}°C station weather
+                  </Text>
+                ) : null}
               </View>
 
               <View style={styles.ringContainer}>
@@ -463,6 +470,12 @@ const styles = StyleSheet.create({
     fontFamily: typography.fontFamily.regular,
     fontSize: typography.fontSize.xs,
     color: colors.secondaryText,
+  },
+  tempSubText: {
+    fontFamily: typography.fontFamily.medium,
+    fontSize: 11,
+    color: colors.primary,
+    marginTop: 4,
   },
   ringContainer: {
     width: 68,

@@ -11,6 +11,7 @@ import {
   ActivityIndicator,
   RefreshControl,
   FlatList,
+  Platform,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { MaterialIcons } from '@expo/vector-icons';
@@ -49,7 +50,9 @@ const DAYS_OPTIONS = [15, 30, 60, 90];
 export default function InventoryScreen() {
   const { token, user } = useApp();
   const [selectedCategory, setSelectedCategory] = useState<string>('All');
-  const [temperature, setTemperature] = useState<number>(-30);
+  const [liveTemp, setLiveTemp] = useState<number | null>(null);
+  const [temperature, setTemperature] = useState<number>(-33.5);
+  const [isInitialLoad, setIsInitialLoad] = useState<boolean>(true);
   const [forecastDays, setForecastDays] = useState<number>(30);
   const [forecastData, setForecastData] = useState<ForecastResponse | null>(null);
   const [loading, setLoading] = useState<boolean>(true);
@@ -81,6 +84,13 @@ export default function InventoryScreen() {
       if (res.ok) {
         const data: ForecastResponse = await res.json();
         setForecastData(data);
+        if (liveTemp === null && data.temperature_c !== undefined) {
+          setLiveTemp(data.temperature_c);
+          if (isInitialLoad) {
+            setTemperature(data.temperature_c);
+            setIsInitialLoad(false);
+          }
+        }
       }
     } catch (e) {
       console.log('Error fetching forecast:', e);
@@ -199,24 +209,64 @@ export default function InventoryScreen() {
             </View>
           </View>
 
-          {/* Temperature Selector */}
+          {/* Temperature Slider & Reset */}
           <View style={styles.inputGroup}>
             <View style={styles.labelRow}>
-              <Text style={styles.inputLabel}>Antarctic Temperature:</Text>
+              <View style={styles.labelWithReset}>
+                <Text style={styles.inputLabel}>Antarctic Temperature:</Text>
+                {liveTemp !== null ? (
+                  <TouchableOpacity
+                    style={styles.liveResetBtn}
+                    onPress={() => setTemperature(liveTemp)}
+                  >
+                    <MaterialIcons name="refresh" size={12} color={colors.primary} />
+                    <Text style={styles.liveResetText}>Live: {liveTemp}°C</Text>
+                  </TouchableOpacity>
+                ) : null}
+              </View>
               <Text style={styles.tempValText}>{temperature}°C</Text>
             </View>
-            <View style={styles.tempButtonGrid}>
-              {[-10, -20, -30, -40, -50].map((t) => (
-                <TouchableOpacity
-                  key={t}
-                  style={[styles.tempChip, temperature === t && styles.tempChipActive]}
-                  onPress={() => setTemperature(t)}
-                >
-                  <Text style={[styles.tempChipText, temperature === t && styles.tempChipTextActive]}>
-                    {t}°C
-                  </Text>
-                </TouchableOpacity>
-              ))}
+
+            <View style={styles.sliderContainer}>
+              <TouchableOpacity
+                style={styles.stepBtn}
+                onPress={() => setTemperature((prev) => Math.max(-50, Math.round((prev - 1) * 10) / 10))}
+              >
+                <MaterialIcons name="remove" size={16} color={colors.text} />
+              </TouchableOpacity>
+
+              <View style={styles.sliderTrackWrapper}>
+                <Text style={styles.sliderMinMax}>-50°C</Text>
+                {Platform.OS === 'web' ? (
+                  // @ts-ignore
+                  <input
+                    type="range"
+                    min="-50"
+                    max="0"
+                    step="0.5"
+                    value={temperature}
+                    onChange={(e: any) => setTemperature(parseFloat(e.target.value))}
+                    style={{ flex: 1, cursor: 'pointer', accentColor: colors.primary }}
+                  />
+                ) : (
+                  <View style={styles.nativeTrackContainer}>
+                    <View
+                      style={[
+                        styles.nativeTrackFill,
+                        { width: `${((temperature + 50) / 50) * 100}%` },
+                      ]}
+                    />
+                  </View>
+                )}
+                <Text style={styles.sliderMinMax}>0°C</Text>
+              </View>
+
+              <TouchableOpacity
+                style={styles.stepBtn}
+                onPress={() => setTemperature((prev) => Math.min(0, Math.round((prev + 1) * 10) / 10))}
+              >
+                <MaterialIcons name="add" size={16} color={colors.text} />
+              </TouchableOpacity>
             </View>
           </View>
 
@@ -414,8 +464,54 @@ const styles = StyleSheet.create({
   survivalBadgeText: { fontFamily: typography.fontFamily.bold, fontSize: 11, color: colors.accentOrange },
   inputGroup: { gap: 4 },
   labelRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
+  labelWithReset: { flexDirection: 'row', alignItems: 'center', gap: 6 },
   inputLabel: { fontFamily: typography.fontFamily.bold, fontSize: 11, color: colors.secondaryText },
-  tempValText: { fontFamily: typography.fontFamily.bold, fontSize: 12, color: colors.primary },
+  tempValText: { fontFamily: typography.fontFamily.bold, fontSize: 13, color: colors.primary },
+  liveResetBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 2,
+    backgroundColor: colors.primaryIce,
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: radius.pill,
+  },
+  liveResetText: { fontFamily: typography.fontFamily.bold, fontSize: 10, color: colors.primary },
+  sliderContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    marginTop: 4,
+  },
+  stepBtn: {
+    backgroundColor: colors.cardBorder + '60',
+    borderRadius: radius.button,
+    padding: 6,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  sliderTrackWrapper: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+  },
+  sliderMinMax: {
+    fontFamily: typography.fontFamily.regular,
+    fontSize: 10,
+    color: colors.secondaryText,
+  },
+  nativeTrackContainer: {
+    flex: 1,
+    height: 8,
+    backgroundColor: colors.cardBorder,
+    borderRadius: 4,
+    overflow: 'hidden',
+  },
+  nativeTrackFill: {
+    height: '100%',
+    backgroundColor: colors.primary,
+  },
   tempButtonGrid: { flexDirection: 'row', gap: 6, marginTop: 2 },
   tempChip: {
     flex: 1,
