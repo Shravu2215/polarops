@@ -370,6 +370,7 @@ def update_user_role(
     if not target_user:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
 
+    old_role = target_user.role
     target_user.role = req.role
 
     # Sync to Person record
@@ -378,6 +379,25 @@ def update_user_role(
         person.role = req.role
 
     db.commit()
+
+    # Log to Hash Chain
+    last_log = db.query(AuditLog).order_by(AuditLog.id.desc()).first()
+    prev_hash = last_log.hash if last_log else ("0" * 64)
+    now_dt = datetime.now(timezone.utc)
+    payload = {"user_id": target_user.id, "old_role": old_role, "new_role": req.role}
+    new_hash = AuditLog.compute_hash("ROLE_CHANGE", current_user.username, f"USER-{target_user.id}", payload, now_dt, prev_hash)
+    audit_entry = AuditLog(
+        action="ROLE_CHANGE",
+        performed_by=current_user.username,
+        target_resource=f"USER-{target_user.id}",
+        payload=AuditLog.serialize_payload(payload),
+        timestamp=now_dt,
+        prev_hash=prev_hash,
+        hash=new_hash
+    )
+    db.add(audit_entry)
+    db.commit()
+
     return {"message": "User role updated successfully", "user_id": target_user.id, "new_role": req.role}
 
 @app.patch("/me/location")
@@ -563,6 +583,25 @@ def create_cargo(
     db.add(cargo)
     db.commit()
     db.refresh(cargo)
+
+    # Log to Hash Chain
+    last_log = db.query(AuditLog).order_by(AuditLog.id.desc()).first()
+    prev_hash = last_log.hash if last_log else ("0" * 64)
+    now_dt = datetime.now(timezone.utc)
+    payload = {"cargo_id": cargo.id, "code": cargo.shipment_code, "title": cargo.title, "priority": cargo.priority, "weight_kg": cargo.weight_kg}
+    new_hash = AuditLog.compute_hash("CARGO_CREATED", current_user.username, f"CARGO-{cargo.id}", payload, now_dt, prev_hash)
+    audit_entry = AuditLog(
+        action="CARGO_CREATED",
+        performed_by=current_user.username,
+        target_resource=f"CARGO-{cargo.id}",
+        payload=AuditLog.serialize_payload(payload),
+        timestamp=now_dt,
+        prev_hash=prev_hash,
+        hash=new_hash
+    )
+    db.add(audit_entry)
+    db.commit()
+
     return {
         "id": cargo.id,
         "shipment_code": cargo.shipment_code,
@@ -596,6 +635,24 @@ def create_vehicle(
     db.add(v)
     db.commit()
     db.refresh(v)
+
+    # Log to Hash Chain
+    last_log = db.query(AuditLog).order_by(AuditLog.id.desc()).first()
+    prev_hash = last_log.hash if last_log else ("0" * 64)
+    now_dt = datetime.now(timezone.utc)
+    payload = {"vehicle_id": v.id, "name": v.name, "type": v.type, "station": v.station_name}
+    new_hash = AuditLog.compute_hash("VEHICLE_CREATED", current_user.username, f"VEHICLE-{v.id}", payload, now_dt, prev_hash)
+    audit_entry = AuditLog(
+        action="VEHICLE_CREATED",
+        performed_by=current_user.username,
+        target_resource=f"VEHICLE-{v.id}",
+        payload=AuditLog.serialize_payload(payload),
+        timestamp=now_dt,
+        prev_hash=prev_hash,
+        hash=new_hash
+    )
+    db.add(audit_entry)
+    db.commit()
     return {
         "id": v.id,
         "name": v.name,
@@ -914,9 +971,9 @@ async def get_supply_forecast(
 from ortools.sat.python import cp_model
 
 PRIORITY_WEIGHTS = {
-    "Critical": 10,
-    "High": 5,
-    "Medium": 2,
+    "Critical": 1000,
+    "High": 50,
+    "Medium": 5,
     "Low": 1
 }
 
@@ -999,6 +1056,30 @@ def optimize_cargo_loading(
     weight_util = round((total_weight / req.capacity_weight_kg * 100.0), 1) if req.capacity_weight_kg > 0 else 0.0
     vol_util = round((total_volume / req.capacity_volume_m3 * 100.0), 1) if req.capacity_volume_m3 > 0 else 0.0
 
+    # Log to Hash Chain
+    last_log = db.query(AuditLog).order_by(AuditLog.id.desc()).first()
+    prev_hash = last_log.hash if last_log else ("0" * 64)
+    now_dt = datetime.now(timezone.utc)
+    payload_dict = {
+        "capacity_weight_kg": req.capacity_weight_kg,
+        "capacity_volume_m3": req.capacity_volume_m3,
+        "packed_count": len(packed_items),
+        "left_behind_count": len(left_behind_items),
+        "total_priority_value": total_priority
+    }
+    new_hash = AuditLog.compute_hash("CARGO_OPTIMIZED", current_user.username, "CARGO_OPTIMIZER", payload_dict, now_dt, prev_hash)
+    audit_entry = AuditLog(
+        action="CARGO_OPTIMIZED",
+        performed_by=current_user.username,
+        target_resource="CARGO_OPTIMIZER",
+        payload=AuditLog.serialize_payload(payload_dict),
+        timestamp=now_dt,
+        prev_hash=prev_hash,
+        hash=new_hash
+    )
+    db.add(audit_entry)
+    db.commit()
+
     return {
         "status": "Optimal" if sol_status == cp_model.OPTIMAL else "Feasible",
         "packed_items": packed_items,
@@ -1011,3 +1092,32 @@ def optimize_cargo_loading(
         "volume_utilization_percent": min(100.0, vol_util),
         "total_priority_value": total_priority
     }
+
+# --- Hash Chain Audit Ledger Routes ---
+@app.get("/audit")
+def get_audit_logs(
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    logs = db.query(models.AuditLog).order_by(models.AuditLog.id.asc()).all()
+    return [
+        {
+            "id": entry.id,
+            "action": entry.action,
+            "performed_by": entry.performed_by,
+            "target_resource": entry.target_resource,
+            "payload": entry.payload,
+            "timestamp": models.AuditLog.format_timestamp(entry.timestamp),
+            "prev_hash": entry.prev_hash,
+            "hash": entry.hash,
+            "short_hash": entry.hash[:8] if entry.hash else ""
+        }
+        for entry in logs
+    ]
+
+@app.get("/audit/verify")
+def verify_audit_chain(
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    return models.audit.verify_chain(db)

@@ -1,5 +1,8 @@
 import os
 
+# Check if DATABASE_URL was explicitly passed in env
+explicit_db_url = os.environ.get("DATABASE_URL")
+
 # Load .env file if available
 env_path = os.path.join(os.path.dirname(__file__), ".env")
 if os.path.exists(env_path):
@@ -22,7 +25,9 @@ if not ADMIN_PASSWORD or not JWT_SECRET:
 
 use_sqlite = os.getenv("USE_SQLITE", "true").lower() == "true"
 
-if use_sqlite:
+if explicit_db_url:
+    DATABASE_URL = explicit_db_url
+elif use_sqlite:
     DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./polarops.db")
 else:
     DATABASE_URL = os.getenv(

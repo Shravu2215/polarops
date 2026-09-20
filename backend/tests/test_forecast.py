@@ -6,6 +6,7 @@ import json
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 os.environ["USE_SQLITE"] = "true"
+os.environ["DATABASE_URL"] = "sqlite:///./test_polarops_temp.db"
 os.environ["ADMIN_EMAIL"] = "leader@polarops.in"
 os.environ["ADMIN_PASSWORD"] = "test_suite_leader_password_2026"
 os.environ["JWT_SECRET"] = "test_suite_jwt_secret_key_2026_x9k2m7"
