@@ -149,19 +149,111 @@ def health_check(db: Session = Depends(get_db)):
         }
     }
 
+class RegisterRequest(BaseModel):
+    username: str
+    email: str
+    password: str
+    role: Optional[str] = "Team Member"
+    station_name: Optional[str] = "Maitri"
+    skills: Optional[List[str]] = []
+
 # --- Real Auth & User Management Routes ---
+@app.post("/auth/register")
+def register_user(req: RegisterRequest, db: Session = Depends(get_db)):
+    clean_username = req.username.strip().lower()
+    clean_email = req.email.strip().lower()
+
+    existing_user = db.query(models.User).filter(
+        (models.User.username == clean_username) | (models.User.email == clean_email)
+    ).first()
+    if existing_user:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Username or email is already registered."
+        )
+
+    hashed_pw = hash_password(req.password)
+    new_user = models.User(
+        username=clean_username,
+        email=clean_email,
+        hashed_password=hashed_pw,
+        role=req.role or "Team Member",
+        station_name=req.station_name or "Maitri"
+    )
+    db.add(new_user)
+    db.commit()
+    db.refresh(new_user)
+
+    # Sync a Person record for location/dispatching
+    initial_lat = -70.7660 if new_user.station_name == "Maitri" else -69.4070
+    initial_lon = 11.7330 if new_user.station_name == "Maitri" else 76.1910
+    default_skill = (req.role or "Member").lower().split(' ')[0]
+    user_skills = req.skills if (req.skills and len(req.skills) > 0) else [default_skill]
+
+    person = models.Person(
+        name=clean_username.capitalize(),
+        role=new_user.role,
+        skills=user_skills,
+        latitude=initial_lat,
+        longitude=initial_lon,
+        station_name=new_user.station_name,
+        status="Active",
+        user_id=new_user.id
+    )
+    db.add(person)
+    db.commit()
+
+    # Log to Audit Ledger
+    last_log = db.query(AuditLog).order_by(AuditLog.id.desc()).first()
+    prev_hash = last_log.hash if last_log else ("0" * 64)
+    now_dt = datetime.now(timezone.utc)
+
+    payload = {"user_id": new_user.id, "username": new_user.username, "email": new_user.email, "role": new_user.role, "station": new_user.station_name}
+    new_hash = AuditLog.compute_hash("USER_REGISTERED", new_user.username, f"USER-{new_user.id}", payload, now_dt, prev_hash)
+
+    audit_entry = AuditLog(
+        action="USER_REGISTERED",
+        performed_by=new_user.username,
+        target_resource=f"USER-{new_user.id}",
+        payload=AuditLog.serialize_payload(payload),
+        timestamp=now_dt,
+        prev_hash=prev_hash,
+        hash=new_hash
+    )
+    db.add(audit_entry)
+    db.commit()
+
+    access_token = create_access_token(data={"sub": new_user.username, "role": new_user.role, "user_id": new_user.id})
+
+    return {
+        "access_token": access_token,
+        "token_type": "bearer",
+        "user": {
+            "id": new_user.id,
+            "username": new_user.username,
+            "email": new_user.email,
+            "role": new_user.role,
+            "station_name": new_user.station_name
+        }
+    }
+
 @app.post("/auth/login")
 def login(req: LoginRequest, db: Session = Depends(get_db)):
-    user = None
-    if req.email:
-        user = db.query(models.User).filter(models.User.email == req.email).first()
-    if not user and req.username:
-        user = db.query(models.User).filter(models.User.username == req.username).first()
+    identifier = (req.email or req.username or "").strip().lower()
+    if not identifier:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Email or username is required"
+        )
+
+    user = db.query(models.User).filter(
+        (models.User.email == identifier) | (models.User.username == identifier)
+    ).first()
 
     if not user or not verify_password(req.password, user.hashed_password):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid email or password"
+            detail="Invalid credentials. Please check your email/username and password."
         )
 
     access_token = create_access_token(data={"sub": user.username, "role": user.role, "user_id": user.id})
@@ -177,6 +269,7 @@ def login(req: LoginRequest, db: Session = Depends(get_db)):
             "station_name": user.station_name
         }
     }
+
 
 @app.post("/users")
 def create_user(

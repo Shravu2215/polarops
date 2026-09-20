@@ -21,14 +21,25 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 export default function LoginScreen() {
   const router = useRouter();
   const { setUser, setToken } = useApp();
-  const [email, setEmail] = useState<string>('leader@polarops.in');
-  const [password, setPassword] = useState<string>('password123');
+  const [isSignUp, setIsSignUp] = useState<boolean>(false);
+
+  // Sign In Form State
+  const [loginEmail, setLoginEmail] = useState<string>('');
+  const [loginPassword, setLoginPassword] = useState<string>('');
+
+  // Sign Up Form State
+  const [regUsername, setRegUsername] = useState<string>('');
+  const [regEmail, setRegEmail] = useState<string>('');
+  const [regPassword, setRegPassword] = useState<string>('');
+  const [regRole, setRegRole] = useState<string>('Team Member');
+  const [regStation, setRegStation] = useState<string>('Maitri');
+
   const [loading, setLoading] = useState<boolean>(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
-  const handleLogin = async () => {
-    if (!email || !password) {
-      setErrorMessage('Please enter both email/username and password.');
+  const handleSignIn = async () => {
+    if (!loginEmail.trim() || !loginPassword) {
+      setErrorMessage('Please enter your email/username and password.');
       return;
     }
 
@@ -39,31 +50,73 @@ export default function LoginScreen() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          email: email.trim(),
-          password: password,
+          email: loginEmail.trim(),
+          password: loginPassword,
         }),
       });
 
       if (!response.ok) {
         const errData = await response.json().catch(() => ({}));
-        throw new Error(errData.detail || `Server status ${response.status}`);
+        throw new Error(errData.detail || `Invalid credentials (${response.status})`);
       }
 
       const data = await response.json();
       setUser(data.user);
       setToken(data.access_token);
 
-      // Save token securely
       try {
         await SecureStore.setItemAsync('access_token', data.access_token);
-      } catch (e) {
-        console.log('SecureStore write failed:', e);
-      }
+      } catch (e) {}
 
       router.replace('/(tabs)');
     } catch (err: any) {
       console.log('Login failed:', err);
-      setErrorMessage(err.message || 'Invalid credentials or server unreachable.');
+      setErrorMessage(
+        err.message || `Unable to reach backend at ${BACKEND_URL}. Check network connection.`
+      );
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleSignUp = async () => {
+    if (!regUsername.trim() || !regEmail.trim() || !regPassword) {
+      setErrorMessage('Username, email, and password are all required.');
+      return;
+    }
+
+    setLoading(true);
+    setErrorMessage(null);
+    try {
+      const response = await fetch(`${BACKEND_URL}/auth/register`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          username: regUsername.trim(),
+          email: regEmail.trim(),
+          password: regPassword,
+          role: regRole,
+          station_name: regStation,
+        }),
+      });
+
+      if (!response.ok) {
+        const errData = await response.json().catch(() => ({}));
+        throw new Error(errData.detail || `Registration failed (${response.status})`);
+      }
+
+      const data = await response.json();
+      setUser(data.user);
+      setToken(data.access_token);
+
+      try {
+        await SecureStore.setItemAsync('access_token', data.access_token);
+      } catch (e) {}
+
+      router.replace('/(tabs)');
+    } catch (err: any) {
+      console.log('Registration failed:', err);
+      setErrorMessage(err.message || 'Registration failed. Username or email may exist.');
     } finally {
       setLoading(false);
     }
@@ -82,12 +135,37 @@ export default function LoginScreen() {
               <MaterialIcons name="ac-unit" size={32} color={colors.primary} />
             </View>
             <Text style={styles.appTitle}>PolarOps</Text>
-            <Text style={styles.subTitle}>Antarctic Expedition Operations</Text>
+            <Text style={styles.subTitle}>Antarctic Expedition Operations Engine</Text>
           </View>
 
           {/* Form Card */}
           <View style={styles.card}>
-            <Text style={styles.cardTitle}>Account Sign In</Text>
+            {/* Mode Switcher Tabs */}
+            <View style={styles.tabContainer}>
+              <TouchableOpacity
+                style={[styles.tabButton, !isSignUp && styles.tabButtonActive]}
+                onPress={() => {
+                  setIsSignUp(false);
+                  setErrorMessage(null);
+                }}
+              >
+                <Text style={[styles.tabText, !isSignUp && styles.tabTextActive]}>
+                  Sign In
+                </Text>
+              </TouchableOpacity>
+
+              <TouchableOpacity
+                style={[styles.tabButton, isSignUp && styles.tabButtonActive]}
+                onPress={() => {
+                  setIsSignUp(true);
+                  setErrorMessage(null);
+                }}
+              >
+                <Text style={[styles.tabText, isSignUp && styles.tabTextActive]}>
+                  Create Account
+                </Text>
+              </TouchableOpacity>
+            </View>
 
             {errorMessage ? (
               <View style={styles.errorCard}>
@@ -96,59 +174,181 @@ export default function LoginScreen() {
               </View>
             ) : null}
 
-            {/* Email / Username Field */}
-            <View style={styles.inputGroup}>
-              <Text style={styles.inputLabel}>Email or Username</Text>
-              <View style={styles.inputWrapper}>
-                <MaterialIcons name="email" size={20} color={colors.secondaryText} />
-                <TextInput
-                  style={styles.textInput}
-                  placeholder="leader@polarops.in"
-                  placeholderTextColor={colors.secondaryText}
-                  value={email}
-                  onChangeText={setEmail}
-                  autoCapitalize="none"
-                  keyboardType="email-address"
-                />
+            {!isSignUp ? (
+              /* --- SIGN IN FORM --- */
+              <View style={styles.formContent}>
+                <View style={styles.inputGroup}>
+                  <Text style={styles.inputLabel}>Email or Username</Text>
+                  <View style={styles.inputWrapper}>
+                    <MaterialIcons name="person" size={20} color={colors.secondaryText} />
+                    <TextInput
+                      style={styles.textInput}
+                      placeholder="Enter username or email"
+                      placeholderTextColor={colors.secondaryText}
+                      value={loginEmail}
+                      onChangeText={setLoginEmail}
+                      autoCapitalize="none"
+                    />
+                  </View>
+                </View>
+
+                <View style={styles.inputGroup}>
+                  <Text style={styles.inputLabel}>Password</Text>
+                  <View style={styles.inputWrapper}>
+                    <MaterialIcons name="lock" size={20} color={colors.secondaryText} />
+                    <TextInput
+                      style={styles.textInput}
+                      placeholder="Enter password"
+                      placeholderTextColor={colors.secondaryText}
+                      value={loginPassword}
+                      onChangeText={setLoginPassword}
+                      secureTextEntry
+                    />
+                  </View>
+                </View>
+
+                <TouchableOpacity
+                  style={styles.actionButton}
+                  onPress={handleSignIn}
+                  disabled={loading}
+                  activeOpacity={0.8}
+                >
+                  {loading ? (
+                    <ActivityIndicator color={colors.white} size="small" />
+                  ) : (
+                    <>
+                      <Text style={styles.actionButtonText}>SIGN IN</Text>
+                      <MaterialIcons name="arrow-forward" size={18} color={colors.white} />
+                    </>
+                  )}
+                </TouchableOpacity>
               </View>
-            </View>
+            ) : (
+              /* --- SIGN UP FORM --- */
+              <View style={styles.formContent}>
+                <View style={styles.inputGroup}>
+                  <Text style={styles.inputLabel}>Username</Text>
+                  <View style={styles.inputWrapper}>
+                    <MaterialIcons name="person-outline" size={20} color={colors.secondaryText} />
+                    <TextInput
+                      style={styles.textInput}
+                      placeholder="e.g. rajesh_gupta"
+                      placeholderTextColor={colors.secondaryText}
+                      value={regUsername}
+                      onChangeText={setRegUsername}
+                      autoCapitalize="none"
+                    />
+                  </View>
+                </View>
 
-            {/* Password Field */}
-            <View style={styles.inputGroup}>
-              <Text style={styles.inputLabel}>Password</Text>
-              <View style={styles.inputWrapper}>
-                <MaterialIcons name="lock" size={20} color={colors.secondaryText} />
-                <TextInput
-                  style={styles.textInput}
-                  placeholder="••••••••"
-                  placeholderTextColor={colors.secondaryText}
-                  value={password}
-                  onChangeText={setPassword}
-                  secureTextEntry
-                />
+                <View style={styles.inputGroup}>
+                  <Text style={styles.inputLabel}>Email Address</Text>
+                  <View style={styles.inputWrapper}>
+                    <MaterialIcons name="email" size={20} color={colors.secondaryText} />
+                    <TextInput
+                      style={styles.textInput}
+                      placeholder="e.g. rajesh@polarops.in"
+                      placeholderTextColor={colors.secondaryText}
+                      value={regEmail}
+                      onChangeText={setRegEmail}
+                      autoCapitalize="none"
+                      keyboardType="email-address"
+                    />
+                  </View>
+                </View>
+
+                <View style={styles.inputGroup}>
+                  <Text style={styles.inputLabel}>Password</Text>
+                  <View style={styles.inputWrapper}>
+                    <MaterialIcons name="lock" size={20} color={colors.secondaryText} />
+                    <TextInput
+                      style={styles.textInput}
+                      placeholder="Create a password"
+                      placeholderTextColor={colors.secondaryText}
+                      value={regPassword}
+                      onChangeText={setRegPassword}
+                      secureTextEntry
+                    />
+                  </View>
+                </View>
+
+                {/* Role Selector */}
+                <Text style={styles.inputLabel}>Select Your Role</Text>
+                <View style={styles.roleGrid}>
+                  {[
+                    'Expedition Leader',
+                    'Logistics Officer',
+                    'Base Admin',
+                    'Team Member',
+                  ].map((role) => (
+                    <TouchableOpacity
+                      key={role}
+                      style={[
+                        styles.roleOption,
+                        regRole === role && styles.roleOptionActive,
+                      ]}
+                      onPress={() => setRegRole(role)}
+                    >
+                      <Text
+                        style={[
+                          styles.roleOptionText,
+                          regRole === role && styles.roleOptionTextActive,
+                        ]}
+                      >
+                        {role}
+                      </Text>
+                    </TouchableOpacity>
+                  ))}
+                </View>
+
+                {/* Station Selector */}
+                <Text style={styles.inputLabel}>Assigned Research Station</Text>
+                <View style={styles.stationRow}>
+                  {['Maitri', 'Bharati'].map((st) => (
+                    <TouchableOpacity
+                      key={st}
+                      style={[
+                        styles.stationOption,
+                        regStation === st && styles.stationOptionActive,
+                      ]}
+                      onPress={() => setRegStation(st)}
+                    >
+                      <Text
+                        style={[
+                          styles.stationOptionText,
+                          regStation === st && styles.stationOptionTextActive,
+                        ]}
+                      >
+                        {st} Station
+                      </Text>
+                    </TouchableOpacity>
+                  ))}
+                </View>
+
+                <TouchableOpacity
+                  style={styles.actionButton}
+                  onPress={handleSignUp}
+                  disabled={loading}
+                  activeOpacity={0.8}
+                >
+                  {loading ? (
+                    <ActivityIndicator color={colors.white} size="small" />
+                  ) : (
+                    <>
+                      <Text style={styles.actionButtonText}>CREATE ACCOUNT & SIGN IN</Text>
+                      <MaterialIcons name="check" size={18} color={colors.white} />
+                    </>
+                  )}
+                </TouchableOpacity>
               </View>
+            )}
+
+            <View style={styles.configNotice}>
+              <MaterialIcons name="wifi" size={14} color={colors.secondaryText} />
+              <Text style={styles.configNoticeText} numberOfLines={1}>
+                Target Backend: {BACKEND_URL}
+              </Text>
             </View>
-
-            {/* Login Submit Button */}
-            <TouchableOpacity
-              style={styles.loginButton}
-              onPress={handleLogin}
-              disabled={loading}
-              activeOpacity={0.8}
-            >
-              {loading ? (
-                <ActivityIndicator color={colors.white} size="small" />
-              ) : (
-                <>
-                  <Text style={styles.loginButtonText}>LOGIN TO POLAROPS</Text>
-                  <MaterialIcons name="arrow-forward" size={18} color={colors.white} />
-                </>
-              )}
-            </TouchableOpacity>
-
-            <Text style={styles.hintText}>
-              Default Bootstrap Admin: leader@polarops.in / password123
-            </Text>
           </View>
         </ScrollView>
       </KeyboardAvoidingView>
@@ -163,15 +363,16 @@ const styles = StyleSheet.create({
   },
   scrollContent: {
     padding: spacing.md,
-    paddingTop: spacing.xl,
+    paddingTop: spacing.lg,
+    paddingBottom: spacing.xl,
   },
   headerSection: {
     alignItems: 'center',
-    marginBottom: spacing.lg,
+    marginBottom: spacing.md,
   },
   iconCircle: {
-    width: 56,
-    height: 56,
+    width: 52,
+    height: 52,
     borderRadius: radius.circle,
     backgroundColor: colors.primaryIce,
     alignItems: 'center',
@@ -186,7 +387,7 @@ const styles = StyleSheet.create({
   },
   subTitle: {
     fontFamily: typography.fontFamily.medium,
-    fontSize: typography.fontSize.sm,
+    fontSize: typography.fontSize.xs,
     color: colors.secondaryText,
     marginTop: 2,
   },
@@ -195,20 +396,40 @@ const styles = StyleSheet.create({
     borderRadius: radius.card,
     borderWidth: 1,
     borderColor: colors.cardBorder,
-    padding: spacing.lg,
+    padding: spacing.md,
     gap: spacing.md,
   },
-  cardTitle: {
+  tabContainer: {
+    flexDirection: 'row',
+    backgroundColor: colors.background,
+    borderRadius: radius.button,
+    padding: 3,
+    borderWidth: 1,
+    borderColor: colors.cardBorder,
+  },
+  tabButton: {
+    flex: 1,
+    paddingVertical: spacing.xs + 2,
+    alignItems: 'center',
+    borderRadius: radius.button - 2,
+  },
+  tabButtonActive: {
+    backgroundColor: colors.primary,
+  },
+  tabText: {
     fontFamily: typography.fontFamily.bold,
-    fontSize: typography.fontSize.lg,
-    color: colors.text,
+    fontSize: typography.fontSize.xs,
+    color: colors.secondaryText,
+  },
+  tabTextActive: {
+    color: colors.white,
   },
   errorCard: {
     backgroundColor: '#FDF2F2',
     borderColor: '#F8D7D7',
     borderWidth: 1,
     borderRadius: radius.card,
-    padding: spacing.sm + 2,
+    padding: spacing.sm,
     flexDirection: 'row',
     alignItems: 'center',
     gap: spacing.sm,
@@ -219,13 +440,17 @@ const styles = StyleSheet.create({
     fontSize: typography.fontSize.xs,
     color: colors.dangerRed,
   },
+  formContent: {
+    gap: spacing.sm,
+  },
   inputGroup: {
-    gap: spacing.xs,
+    gap: 4,
   },
   inputLabel: {
     fontFamily: typography.fontFamily.bold,
     fontSize: typography.fontSize.xs,
     color: colors.text,
+    marginTop: 2,
   },
   inputWrapper: {
     flexDirection: 'row',
@@ -244,7 +469,61 @@ const styles = StyleSheet.create({
     fontSize: typography.fontSize.sm,
     color: colors.text,
   },
-  loginButton: {
+  roleGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 6,
+  },
+  roleOption: {
+    width: '48%',
+    paddingVertical: spacing.xs + 2,
+    paddingHorizontal: spacing.xs,
+    borderRadius: radius.button,
+    borderWidth: 1,
+    borderColor: colors.cardBorder,
+    backgroundColor: colors.background,
+    alignItems: 'center',
+  },
+  roleOptionActive: {
+    backgroundColor: colors.primaryIce,
+    borderColor: colors.primary,
+  },
+  roleOptionText: {
+    fontFamily: typography.fontFamily.medium,
+    fontSize: 11,
+    color: colors.secondaryText,
+  },
+  roleOptionTextActive: {
+    fontFamily: typography.fontFamily.bold,
+    color: colors.primary,
+  },
+  stationRow: {
+    flexDirection: 'row',
+    gap: spacing.sm,
+  },
+  stationOption: {
+    flex: 1,
+    paddingVertical: spacing.xs + 2,
+    borderRadius: radius.button,
+    borderWidth: 1,
+    borderColor: colors.cardBorder,
+    backgroundColor: colors.background,
+    alignItems: 'center',
+  },
+  stationOptionActive: {
+    backgroundColor: colors.primaryIce,
+    borderColor: colors.primary,
+  },
+  stationOptionText: {
+    fontFamily: typography.fontFamily.medium,
+    fontSize: 12,
+    color: colors.secondaryText,
+  },
+  stationOptionTextActive: {
+    fontFamily: typography.fontFamily.bold,
+    color: colors.primary,
+  },
+  actionButton: {
     height: layout.minButtonHeight,
     backgroundColor: colors.primary,
     borderRadius: radius.button,
@@ -252,19 +531,24 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
     gap: spacing.sm,
-    marginTop: spacing.xs,
+    marginTop: spacing.sm,
   },
-  loginButtonText: {
+  actionButtonText: {
     fontFamily: typography.fontFamily.bold,
-    fontSize: typography.fontSize.sm,
+    fontSize: typography.fontSize.xs,
     color: colors.white,
     letterSpacing: 0.5,
   },
-  hintText: {
-    fontFamily: typography.fontFamily.regular,
-    fontSize: 11,
-    color: colors.secondaryText,
-    textAlign: 'center',
+  configNotice: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: spacing.xs,
     marginTop: spacing.xs,
+  },
+  configNoticeText: {
+    fontFamily: typography.fontFamily.regular,
+    fontSize: 10,
+    color: colors.secondaryText,
   },
 });
