@@ -4,11 +4,12 @@ import {
   Text,
   StyleSheet,
   ScrollView,
-  TouchableOpacity,
   ActivityIndicator,
   RefreshControl,
+  TouchableOpacity,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
+import { useRouter } from 'expo-router';
 import { MaterialIcons } from '@expo/vector-icons';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import Header from '../../components/Header';
@@ -25,26 +26,37 @@ interface AlertItem {
   created_at: string;
 }
 
+interface WeatherData {
+  station: string;
+  latitude: number;
+  longitude: number;
+  temperature: number;
+  unit: string;
+  wind_speed_kmh: number;
+  wind_chill: number;
+  humidity: number;
+  blizzard_warning: string | null;
+  is_stale: boolean;
+  fetched_at?: string;
+}
+
 interface DashboardSummary {
-  survival_days: number;
+  survival_days: number | null;
   active_expeditions: number;
   cargo_in_transit: number;
   personnel_on_field: number;
   low_stock_items: number;
   team_size: number;
+  active_expedition_name: string | null;
+  active_station: string | null;
   latest_alerts: AlertItem[];
-  weather: {
-    temperature: number;
-    unit: string;
-    wind_chill: number;
-    station: string;
-    blizzard_warning: string;
-  };
+  weather: WeatherData | null;
 }
 
 const STORAGE_KEY = '@polarops_dashboard_summary';
 
 export default function HomeScreen() {
+  const router = useRouter();
   const [data, setData] = useState<DashboardSummary | null>(null);
   const [loading, setLoading] = useState<boolean>(true);
   const [refreshing, setRefreshing] = useState<boolean>(false);
@@ -73,42 +85,17 @@ export default function HomeScreen() {
         setData(JSON.parse(cached));
         setIsOfflineData(true);
       } else {
-        // Fallback default mock data if no cache exists yet
         setData({
-          survival_days: 23.0,
-          active_expeditions: 1,
-          cargo_in_transit: 1,
-          personnel_on_field: 4,
+          survival_days: null,
+          active_expeditions: 0,
+          cargo_in_transit: 0,
+          personnel_on_field: 0,
           low_stock_items: 0,
-          team_size: 40,
-          latest_alerts: [
-            {
-              id: 2,
-              title: 'Blizzard Level 2 Warning',
-              message: 'Winds exceeding 65 knots forecasted across Schirmacher Oasis.',
-              severity: 'High',
-              alert_type: 'Weather',
-              status: 'Active',
-              created_at: new Date().toISOString(),
-            },
-            {
-              id: 1,
-              title: 'Crevasse Slip near Ridge Bravo',
-              message: 'Field team Skidoo track failure near crevasse zone.',
-              severity: 'Critical',
-              alert_type: 'SOS',
-              status: 'Active',
-              created_at: new Date().toISOString(),
-            },
-          ],
-          weather: {
-            temperature: -24.5,
-            unit: '°C',
-            wind_chill: -38.0,
-            station: 'Maitri',
-            blizzard_warning:
-              'Blizzard Level 2 Warning: Winds > 65 knots expected in 4 hours',
-          },
+          team_size: 0,
+          active_expedition_name: null,
+          active_station: null,
+          latest_alerts: [],
+          weather: null,
         });
         setIsOfflineData(true);
       }
@@ -133,7 +120,7 @@ export default function HomeScreen() {
         <Header title="PolarOps Dashboard" />
         <View style={styles.loadingContainer}>
           <ActivityIndicator size="large" color={colors.primary} />
-          <Text style={styles.loadingText}>Connecting to Station Engine...</Text>
+          <Text style={styles.loadingText}>Fetching Station Metrics...</Text>
         </View>
       </SafeAreaView>
     );
@@ -177,66 +164,82 @@ export default function HomeScreen() {
         ) : null}
 
         {/* Hero Card: Survival Days Left */}
-        <View style={styles.heroCard}>
-          <View style={styles.heroHeader}>
-            <View>
-              <Text style={styles.heroSubTitle}>Ration & Fuel Duration</Text>
-              <Text style={styles.heroTitle}>Survival Days Left</Text>
-            </View>
+        {data?.survival_days !== null && data?.survival_days !== undefined ? (
+          <View style={styles.heroCard}>
+            <View style={styles.heroHeader}>
+              <View>
+                <Text style={styles.heroSubTitle}>
+                  {data.active_expedition_name || 'Active Expedition'}
+                </Text>
+                <Text style={styles.heroTitle}>Survival Days Left</Text>
+              </View>
 
-            <View style={styles.stationBadge}>
-              <Text style={styles.stationBadgeText}>
-                {data?.weather.station || 'Maitri'} Base
-              </Text>
-            </View>
-          </View>
-
-          {/* Large Counter & Ring Indicator Visual */}
-          <View style={styles.heroBody}>
-            <View style={styles.counterContainer}>
-              <Text style={styles.survivalValue}>
-                {data?.survival_days ?? 23}{' '}
-                <Text style={styles.unitText}>Days</Text>
-              </Text>
-
-              <View style={styles.statusIndicatorRow}>
-                <View style={[styles.statusDot, { backgroundColor: colors.okGreen }]} />
-                <Text style={styles.statusText}>
-                  Stock Stable ({data?.team_size ?? 40} Team Members)
+              <View style={styles.stationBadge}>
+                <Text style={styles.stationBadgeText}>
+                  {data.active_station || 'Maitri'} Station
                 </Text>
               </View>
             </View>
 
-            {/* Custom Circular Progress Visual */}
-            <View style={styles.ringContainer}>
-              <View style={styles.outerRing}>
-                <View style={styles.innerRing}>
-                  <MaterialIcons name="shield" size={28} color={colors.primary} />
+            <View style={styles.heroBody}>
+              <View style={styles.counterContainer}>
+                <Text style={styles.survivalValue}>
+                  {data.survival_days}{' '}
+                  <Text style={styles.unitText}>Days</Text>
+                </Text>
+
+                <View style={styles.statusIndicatorRow}>
+                  <View style={[styles.statusDot, { backgroundColor: colors.okGreen }]} />
+                  <Text style={styles.statusText}>
+                    Stock Operational ({data.team_size} Team Members)
+                  </Text>
+                </View>
+              </View>
+
+              <View style={styles.ringContainer}>
+                <View style={styles.outerRing}>
+                  <View style={styles.innerRing}>
+                    <MaterialIcons name="shield" size={26} color={colors.primary} />
+                  </View>
                 </View>
               </View>
             </View>
           </View>
-        </View>
+        ) : (
+          <View style={styles.emptyCard}>
+            <MaterialIcons name="event-busy" size={36} color={colors.secondaryText} />
+            <Text style={styles.emptyTitle}>No Active Expedition</Text>
+            <Text style={styles.emptySub}>
+              Create an expedition to compute survival days & live station metrics.
+            </Text>
+            <TouchableOpacity
+              style={styles.emptyActionButton}
+              onPress={() => router.push('/more')}
+            >
+              <Text style={styles.emptyActionText}>Create Expedition</Text>
+            </TouchableOpacity>
+          </View>
+        )}
 
         {/* 2x2 Stat Cards */}
         <Text style={styles.sectionHeader}>Station Operational Metrics</Text>
         <View style={styles.statsGrid}>
           <View style={styles.statCard}>
             <MaterialIcons name="flag" size={22} color={colors.primary} />
-            <Text style={styles.statValue}>{data?.active_expeditions ?? 1}</Text>
+            <Text style={styles.statValue}>{data?.active_expeditions ?? 0}</Text>
             <Text style={styles.statLabel}>Active Expeditions</Text>
           </View>
 
           <View style={styles.statCard}>
             <MaterialIcons name="local-shipping" size={22} color={colors.accentOrange} />
-            <Text style={styles.statValue}>{data?.cargo_in_transit ?? 1}</Text>
+            <Text style={styles.statValue}>{data?.cargo_in_transit ?? 0}</Text>
             <Text style={styles.statLabel}>Cargo In-Transit</Text>
           </View>
 
           <View style={styles.statCard}>
             <MaterialIcons name="people" size={22} color={colors.okGreen} />
-            <Text style={styles.statValue}>{data?.personnel_on_field ?? 4}</Text>
-            <Text style={styles.statLabel}>Field Personnel</Text>
+            <Text style={styles.statValue}>{data?.personnel_on_field ?? 0}</Text>
+            <Text style={styles.statLabel}>Active Responders (10m)</Text>
           </View>
 
           <View style={styles.statCard}>
@@ -247,42 +250,52 @@ export default function HomeScreen() {
         </View>
 
         {/* Weather Card */}
-        <Text style={styles.sectionHeader}>Polar Weather — {data?.weather.station || 'Maitri'}</Text>
-        <View style={styles.weatherCard}>
-          <View style={styles.weatherRow}>
-            <View style={styles.weatherItem}>
-              <MaterialIcons name="ac-unit" size={24} color={colors.primary} />
-              <View>
-                <Text style={styles.weatherValue}>
-                  {data?.weather.temperature ?? -24.5}°C
-                </Text>
-                <Text style={styles.weatherLabel}>Ambient Temp</Text>
+        <Text style={styles.sectionHeader}>
+          Polar Weather — {data?.active_station || 'Maitri'}
+        </Text>
+        {data?.weather ? (
+          <View style={styles.weatherCard}>
+            <View style={styles.weatherRow}>
+              <View style={styles.weatherItem}>
+                <MaterialIcons name="ac-unit" size={24} color={colors.primary} />
+                <View>
+                  <Text style={styles.weatherValue}>
+                    {data.weather.temperature}{data.weather.unit}
+                  </Text>
+                  <Text style={styles.weatherLabel}>Live Open-Meteo</Text>
+                </View>
+              </View>
+
+              <View style={styles.divider} />
+
+              <View style={styles.weatherItem}>
+                <MaterialIcons name="air" size={24} color={colors.secondaryText} />
+                <View>
+                  <Text style={styles.weatherValue}>
+                    {data.weather.wind_chill}{data.weather.unit}
+                  </Text>
+                  <Text style={styles.weatherLabel}>Wind Chill ({data.weather.wind_speed_kmh} km/h)</Text>
+                </View>
               </View>
             </View>
 
-            <View style={styles.divider} />
-
-            <View style={styles.weatherItem}>
-              <MaterialIcons name="air" size={24} color={colors.secondaryText} />
-              <View>
-                <Text style={styles.weatherValue}>
-                  {data?.weather.wind_chill ?? -38.0}°C
+            {data.weather.blizzard_warning ? (
+              <View style={styles.blizzardNoticeCard}>
+                <MaterialIcons name="warning" size={18} color={colors.warningAmber} />
+                <Text style={styles.blizzardNoticeText}>
+                  {data.weather.blizzard_warning}
                 </Text>
-                <Text style={styles.weatherLabel}>Wind Chill</Text>
               </View>
-            </View>
+            ) : null}
           </View>
-
-          {/* Amber Blizzard Warning Notice Box */}
-          {data?.weather.blizzard_warning ? (
-            <View style={styles.blizzardNoticeCard}>
-              <MaterialIcons name="warning" size={20} color={colors.warningAmber} />
-              <Text style={styles.blizzardNoticeText}>
-                {data.weather.blizzard_warning}
-              </Text>
-            </View>
-          ) : null}
-        </View>
+        ) : (
+          <View style={styles.emptyWeatherCard}>
+            <MaterialIcons name="cloud-off" size={24} color={colors.secondaryText} />
+            <Text style={styles.emptyWeatherText}>
+              No station weather available. Add an active expedition with station coordinates.
+            </Text>
+          </View>
+        )}
 
         {/* Latest Alerts List */}
         <View style={styles.sectionHeaderRow}>
@@ -292,41 +305,48 @@ export default function HomeScreen() {
           </Text>
         </View>
 
-        <View style={styles.alertsList}>
-          {data?.latest_alerts.map((alert) => (
-            <View key={alert.id} style={styles.alertCard}>
-              <View
-                style={[
-                  styles.severityDot,
-                  { backgroundColor: getSeverityColor(alert.severity) },
-                ]}
-              />
+        {data?.latest_alerts && data.latest_alerts.length > 0 ? (
+          <View style={styles.alertsList}>
+            {data.latest_alerts.map((alert) => (
+              <View key={alert.id} style={styles.alertCard}>
+                <View
+                  style={[
+                    styles.severityDot,
+                    { backgroundColor: getSeverityColor(alert.severity) },
+                  ]}
+                />
 
-              <View style={styles.alertContent}>
-                <View style={styles.alertTitleRow}>
-                  <Text style={styles.alertTitle}>{alert.title}</Text>
-                  <View
-                    style={[
-                      styles.severityBadge,
-                      { borderColor: getSeverityColor(alert.severity) },
-                    ]}
-                  >
-                    <Text
+                <View style={styles.alertContent}>
+                  <View style={styles.alertTitleRow}>
+                    <Text style={styles.alertTitle}>{alert.title}</Text>
+                    <View
                       style={[
-                        styles.severityBadgeText,
-                        { color: getSeverityColor(alert.severity) },
+                        styles.severityBadge,
+                        { borderColor: getSeverityColor(alert.severity) },
                       ]}
                     >
-                      {alert.severity}
-                    </Text>
+                      <Text
+                        style={[
+                          styles.severityBadgeText,
+                          { color: getSeverityColor(alert.severity) },
+                        ]}
+                      >
+                        {alert.severity}
+                      </Text>
+                    </View>
                   </View>
-                </View>
 
-                <Text style={styles.alertMessage}>{alert.message}</Text>
+                  <Text style={styles.alertMessage}>{alert.message}</Text>
+                </View>
               </View>
-            </View>
-          ))}
-        </View>
+            ))}
+          </View>
+        ) : (
+          <View style={styles.emptyAlertsCard}>
+            <MaterialIcons name="check-circle-outline" size={24} color={colors.okGreen} />
+            <Text style={styles.emptyAlertsText}>All clear. No active alerts logged.</Text>
+          </View>
+        )}
       </ScrollView>
     </SafeAreaView>
   );
@@ -350,7 +370,7 @@ const styles = StyleSheet.create({
   },
   scrollContent: {
     padding: spacing.md,
-    paddingBottom: spacing.xl + 20,
+    paddingBottom: 110,
     gap: spacing.md,
   },
   offlineNoteCard: {
@@ -462,6 +482,38 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
   },
+  emptyCard: {
+    backgroundColor: colors.card,
+    borderRadius: radius.card,
+    borderWidth: 1,
+    borderColor: colors.cardBorder,
+    padding: spacing.lg,
+    alignItems: 'center',
+    gap: spacing.xs,
+  },
+  emptyTitle: {
+    fontFamily: typography.fontFamily.bold,
+    fontSize: typography.fontSize.base,
+    color: colors.text,
+  },
+  emptySub: {
+    fontFamily: typography.fontFamily.regular,
+    fontSize: typography.fontSize.xs,
+    color: colors.secondaryText,
+    textAlign: 'center',
+  },
+  emptyActionButton: {
+    backgroundColor: colors.primaryIce,
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.xs + 2,
+    borderRadius: radius.button,
+    marginTop: spacing.xs,
+  },
+  emptyActionText: {
+    fontFamily: typography.fontFamily.bold,
+    fontSize: typography.fontSize.xs,
+    color: colors.primary,
+  },
   sectionHeader: {
     fontFamily: typography.fontFamily.bold,
     fontSize: typography.fontSize.base,
@@ -551,6 +603,22 @@ const styles = StyleSheet.create({
     color: colors.warningAmber,
     lineHeight: 16,
   },
+  emptyWeatherCard: {
+    backgroundColor: colors.card,
+    borderRadius: radius.card,
+    borderWidth: 1,
+    borderColor: colors.cardBorder,
+    padding: spacing.md,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.sm,
+  },
+  emptyWeatherText: {
+    flex: 1,
+    fontFamily: typography.fontFamily.regular,
+    fontSize: typography.fontSize.xs,
+    color: colors.secondaryText,
+  },
   alertsList: {
     gap: spacing.sm,
   },
@@ -599,5 +667,20 @@ const styles = StyleSheet.create({
     fontSize: typography.fontSize.xs,
     color: colors.secondaryText,
     lineHeight: 16,
+  },
+  emptyAlertsCard: {
+    backgroundColor: colors.card,
+    borderRadius: radius.card,
+    borderWidth: 1,
+    borderColor: colors.cardBorder,
+    padding: spacing.md,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.sm,
+  },
+  emptyAlertsText: {
+    fontFamily: typography.fontFamily.medium,
+    fontSize: typography.fontSize.xs,
+    color: colors.secondaryText,
   },
 });

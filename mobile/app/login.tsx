@@ -3,169 +3,155 @@ import {
   View,
   Text,
   StyleSheet,
+  TextInput,
   TouchableOpacity,
   ActivityIndicator,
+  ScrollView,
+  KeyboardAvoidingView,
+  Platform,
 } from 'react-native';
 import { useRouter } from 'expo-router';
 import { MaterialIcons } from '@expo/vector-icons';
-import { colors, spacing, radius, typography } from '../theme';
+import * as SecureStore from 'expo-secure-store';
+import { colors, spacing, radius, typography, layout } from '../theme';
 import { BACKEND_URL } from '../config';
 import { useApp } from '../context/AppContext';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
-interface RoleOption {
-  username: string;
-  roleName: string;
-  station: string;
-  description: string;
-  icon: keyof typeof MaterialIcons.glyphMap;
-}
-
-const ROLES: RoleOption[] = [
-  {
-    username: 'leader',
-    roleName: 'Expedition Leader',
-    station: 'Maitri',
-    description: 'Full station oversight, approves plans & handles SOS',
-    icon: 'stars',
-  },
-  {
-    username: 'logistics',
-    roleName: 'Logistics Officer',
-    station: 'Maitri',
-    description: 'Manages cargo shipments & stock optimization',
-    icon: 'local-shipping',
-  },
-  {
-    username: 'admin',
-    roleName: 'Base Admin',
-    station: 'Bharati',
-    description: 'Monitors station inventory & daily burn rates',
-    icon: 'storefront',
-  },
-  {
-    username: 'member',
-    roleName: 'Team Member',
-    station: 'Maitri',
-    description: 'Field check-ins, duty status & instant SOS alerts',
-    icon: 'person',
-  },
-];
-
 export default function LoginScreen() {
   const router = useRouter();
   const { setUser, setToken } = useApp();
-  const [loadingRole, setLoadingRole] = useState<string | null>(null);
+  const [email, setEmail] = useState<string>('leader@polarops.in');
+  const [password, setPassword] = useState<string>('password123');
+  const [loading, setLoading] = useState<boolean>(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
-  const handleLogin = async (username: string) => {
-    setLoadingRole(username);
+  const handleLogin = async () => {
+    if (!email || !password) {
+      setErrorMessage('Please enter both email/username and password.');
+      return;
+    }
+
+    setLoading(true);
     setErrorMessage(null);
     try {
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 4000); // 4s timeout
-
       const response = await fetch(`${BACKEND_URL}/auth/login`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          username: username,
-          password: 'password123',
+          email: email.trim(),
+          password: password,
         }),
-        signal: controller.signal,
       });
-      clearTimeout(timeoutId);
 
       if (!response.ok) {
-        throw new Error(`Server returned error status ${response.status}`);
+        const errData = await response.json().catch(() => ({}));
+        throw new Error(errData.detail || `Server status ${response.status}`);
       }
 
       const data = await response.json();
       setUser(data.user);
       setToken(data.access_token);
+
+      // Save token securely
+      try {
+        await SecureStore.setItemAsync('access_token', data.access_token);
+      } catch (e) {
+        console.log('SecureStore write failed:', e);
+      }
+
       router.replace('/(tabs)');
     } catch (err: any) {
-      console.log('Login connection failed:', err);
-      setErrorMessage(
-        `Unable to connect to backend at ${BACKEND_URL}. Check server or config.ts.`
-      );
+      console.log('Login failed:', err);
+      setErrorMessage(err.message || 'Invalid credentials or server unreachable.');
     } finally {
-      setLoadingRole(null);
+      setLoading(false);
     }
   };
 
   return (
     <SafeAreaView style={styles.container}>
-      {/* Top Header */}
-      <View style={styles.topBar}>
-        <View style={styles.appBrandRow}>
-          <MaterialIcons name="ac-unit" size={24} color={colors.primary} />
-          <Text style={styles.appTitle}>PolarOps</Text>
-        </View>
-      </View>
-
-
-      {/* Main Container */}
-      <View style={styles.content}>
-        {/* Subtitle */}
-        <Text style={styles.subTitle}>Antarctic Expedition Operations</Text>
-
-        {/* Error Banner if Backend Unreachable */}
-        {errorMessage ? (
-          <View style={styles.errorCard}>
-            <MaterialIcons name="error-outline" size={20} color={colors.dangerRed} />
-            <Text style={styles.errorText}>{errorMessage}</Text>
-            <TouchableOpacity onPress={() => setErrorMessage(null)}>
-              <MaterialIcons name="close" size={18} color={colors.secondaryText} />
-            </TouchableOpacity>
+      <KeyboardAvoidingView
+        behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+        style={{ flex: 1 }}
+      >
+        <ScrollView contentContainerStyle={styles.scrollContent}>
+          {/* Header Branding */}
+          <View style={styles.headerSection}>
+            <View style={styles.iconCircle}>
+              <MaterialIcons name="ac-unit" size={32} color={colors.primary} />
+            </View>
+            <Text style={styles.appTitle}>PolarOps</Text>
+            <Text style={styles.subTitle}>Antarctic Expedition Operations</Text>
           </View>
-        ) : null}
 
-        {/* Role Cards List */}
-        <Text style={styles.sectionHeader}>Select Role to Access Dashboard</Text>
+          {/* Form Card */}
+          <View style={styles.card}>
+            <Text style={styles.cardTitle}>Account Sign In</Text>
 
-        <View style={styles.roleList}>
-          {ROLES.map((role) => {
-            const isLoading = loadingRole === role.username;
-            return (
-              <TouchableOpacity
-                key={role.username}
-                style={styles.card}
-                onPress={() => handleLogin(role.username)}
-                disabled={loadingRole !== null}
-                activeOpacity={0.75}
-              >
-                {/* Left Icon Container */}
-                <View style={styles.roleIconContainer}>
-                  <MaterialIcons name={role.icon} size={20} color={colors.primary} />
-                </View>
+            {errorMessage ? (
+              <View style={styles.errorCard}>
+                <MaterialIcons name="error-outline" size={18} color={colors.dangerRed} />
+                <Text style={styles.errorText}>{errorMessage}</Text>
+              </View>
+            ) : null}
 
-                {/* Middle Content */}
-                <View style={styles.roleTextContainer}>
-                  <View style={styles.roleTitleRow}>
-                    <Text style={styles.roleTitle}>{role.roleName}</Text>
-                    <View style={styles.stationBadge}>
-                      <Text style={styles.stationBadgeText}>{role.station}</Text>
-                    </View>
-                  </View>
-                  <Text style={styles.roleDescription} numberOfLines={1}>
-                    {role.description}
-                  </Text>
-                </View>
+            {/* Email / Username Field */}
+            <View style={styles.inputGroup}>
+              <Text style={styles.inputLabel}>Email or Username</Text>
+              <View style={styles.inputWrapper}>
+                <MaterialIcons name="email" size={20} color={colors.secondaryText} />
+                <TextInput
+                  style={styles.textInput}
+                  placeholder="leader@polarops.in"
+                  placeholderTextColor={colors.secondaryText}
+                  value={email}
+                  onChangeText={setEmail}
+                  autoCapitalize="none"
+                  keyboardType="email-address"
+                />
+              </View>
+            </View>
 
-                {/* Right Indicator: Loading Spinner or Chevron */}
-                <View style={styles.rightAction}>
-                  {isLoading ? (
-                    <ActivityIndicator color={colors.primary} size="small" />
-                  ) : (
-                    <MaterialIcons name="chevron-right" size={22} color={colors.secondaryText} />
-                  )}
-                </View>
-              </TouchableOpacity>
-            );
-          })}
-        </View>
-      </View>
+            {/* Password Field */}
+            <View style={styles.inputGroup}>
+              <Text style={styles.inputLabel}>Password</Text>
+              <View style={styles.inputWrapper}>
+                <MaterialIcons name="lock" size={20} color={colors.secondaryText} />
+                <TextInput
+                  style={styles.textInput}
+                  placeholder="••••••••"
+                  placeholderTextColor={colors.secondaryText}
+                  value={password}
+                  onChangeText={setPassword}
+                  secureTextEntry
+                />
+              </View>
+            </View>
+
+            {/* Login Submit Button */}
+            <TouchableOpacity
+              style={styles.loginButton}
+              onPress={handleLogin}
+              disabled={loading}
+              activeOpacity={0.8}
+            >
+              {loading ? (
+                <ActivityIndicator color={colors.white} size="small" />
+              ) : (
+                <>
+                  <Text style={styles.loginButtonText}>LOGIN TO POLAROPS</Text>
+                  <MaterialIcons name="arrow-forward" size={18} color={colors.white} />
+                </>
+              )}
+            </TouchableOpacity>
+
+            <Text style={styles.hintText}>
+              Default Bootstrap Admin: leader@polarops.in / password123
+            </Text>
+          </View>
+        </ScrollView>
+      </KeyboardAvoidingView>
     </SafeAreaView>
   );
 }
@@ -175,38 +161,47 @@ const styles = StyleSheet.create({
     flex: 1,
     backgroundColor: colors.background,
   },
-  topBar: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    paddingHorizontal: spacing.md,
-    paddingTop: spacing.sm,
-    paddingBottom: spacing.xs,
+  scrollContent: {
+    padding: spacing.md,
+    paddingTop: spacing.xl,
   },
-  appBrandRow: {
-    flexDirection: 'row',
+  headerSection: {
     alignItems: 'center',
-    gap: spacing.xs + 2,
+    marginBottom: spacing.lg,
+  },
+  iconCircle: {
+    width: 56,
+    height: 56,
+    borderRadius: radius.circle,
+    backgroundColor: colors.primaryIce,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: spacing.xs,
   },
   appTitle: {
     fontFamily: typography.fontFamily.bold,
-    fontSize: typography.fontSize.xl,
+    fontSize: typography.fontSize.xxl,
     color: colors.primary,
     letterSpacing: 0.5,
-  },
-  settingsIconButton: {
-    padding: spacing.xs,
-  },
-  content: {
-    flex: 1,
-    paddingHorizontal: spacing.md,
-    paddingTop: spacing.xs,
   },
   subTitle: {
     fontFamily: typography.fontFamily.medium,
     fontSize: typography.fontSize.sm,
     color: colors.secondaryText,
-    marginBottom: spacing.md,
+    marginTop: 2,
+  },
+  card: {
+    backgroundColor: colors.card,
+    borderRadius: radius.card,
+    borderWidth: 1,
+    borderColor: colors.cardBorder,
+    padding: spacing.lg,
+    gap: spacing.md,
+  },
+  cardTitle: {
+    fontFamily: typography.fontFamily.bold,
+    fontSize: typography.fontSize.lg,
+    color: colors.text,
   },
   errorCard: {
     backgroundColor: '#FDF2F2',
@@ -217,7 +212,6 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     gap: spacing.sm,
-    marginBottom: spacing.md,
   },
   errorText: {
     flex: 1,
@@ -225,66 +219,52 @@ const styles = StyleSheet.create({
     fontSize: typography.fontSize.xs,
     color: colors.dangerRed,
   },
-  sectionHeader: {
+  inputGroup: {
+    gap: spacing.xs,
+  },
+  inputLabel: {
     fontFamily: typography.fontFamily.bold,
-    fontSize: typography.fontSize.sm,
+    fontSize: typography.fontSize.xs,
     color: colors.text,
-    marginBottom: spacing.sm,
   },
-  roleList: {
-    gap: spacing.sm,
-  },
-  card: {
-    backgroundColor: colors.card,
-    borderRadius: radius.card,
+  inputWrapper: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: colors.background,
     borderWidth: 1,
     borderColor: colors.cardBorder,
-    padding: spacing.sm + 4,
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: spacing.sm + 2,
+    borderRadius: radius.button,
+    paddingHorizontal: spacing.md,
+    height: layout.minButtonHeight,
+    gap: spacing.sm,
   },
-  roleIconContainer: {
-    width: 36,
-    height: 36,
-    borderRadius: radius.default,
-    backgroundColor: colors.primaryIce,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  roleTextContainer: {
+  textInput: {
     flex: 1,
-  },
-  roleTitleRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    marginBottom: 2,
-  },
-  roleTitle: {
-    fontFamily: typography.fontFamily.bold,
+    fontFamily: typography.fontFamily.regular,
     fontSize: typography.fontSize.sm,
     color: colors.text,
   },
-  stationBadge: {
-    backgroundColor: colors.chipBackground,
-    paddingHorizontal: spacing.xs + 2,
-    paddingVertical: 1,
-    borderRadius: radius.pill,
-  },
-  stationBadgeText: {
-    fontFamily: typography.fontFamily.medium,
-    fontSize: 10,
-    color: colors.primary,
-  },
-  roleDescription: {
-    fontFamily: typography.fontFamily.regular,
-    fontSize: 12,
-    color: colors.secondaryText,
-  },
-  rightAction: {
-    width: 24,
+  loginButton: {
+    height: layout.minButtonHeight,
+    backgroundColor: colors.primary,
+    borderRadius: radius.button,
+    flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
+    gap: spacing.sm,
+    marginTop: spacing.xs,
+  },
+  loginButtonText: {
+    fontFamily: typography.fontFamily.bold,
+    fontSize: typography.fontSize.sm,
+    color: colors.white,
+    letterSpacing: 0.5,
+  },
+  hintText: {
+    fontFamily: typography.fontFamily.regular,
+    fontSize: 11,
+    color: colors.secondaryText,
+    textAlign: 'center',
+    marginTop: spacing.xs,
   },
 });

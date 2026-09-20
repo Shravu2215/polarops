@@ -3,14 +3,21 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from sqlalchemy import text
-from typing import Optional, List
+from typing import Optional, List, Any
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 import math
 
 from database import engine, get_db, Base
 import models
 from models.audit import verify_chain, AuditLog
+from auth_utils import (
+    hash_password,
+    verify_password,
+    create_access_token,
+    get_current_user,
+)
+from weather_service import fetch_real_weather
 import config
 
 def haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
@@ -27,9 +34,9 @@ async def lifespan(app: FastAPI):
     yield
 
 app = FastAPI(
-    title="PolarOps Backend API",
-    description="Digital Twin API for Antarctic Research Expeditions (Maitri & Bharati)",
-    version="1.0.0",
+    title="PolarOps Digital Twin Engine",
+    description="Real-time operations & emergency dispatch API for Antarctic stations",
+    version="2.0.0",
     lifespan=lifespan
 )
 
@@ -41,24 +48,79 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Schemas
+# --- Pydantic Schemas ---
 class LoginRequest(BaseModel):
     username: Optional[str] = None
     email: Optional[str] = None
     password: str
 
+class CreateUserRequest(BaseModel):
+    username: str
+    email: str
+    password: str
+    role: str  # Expedition Leader, Logistics Officer, Base Admin, Team Member
+    station_name: str  # Maitri, Bharati
+    skills: Optional[List[str]] = []
+
+class LocationUpdateRequest(BaseModel):
+    latitude: float
+    longitude: float
+
+class ProfileUpdateRequest(BaseModel):
+    role: Optional[str] = None
+    skills: Optional[List[str]] = None
+    phone: Optional[str] = None
+
+class CreateExpeditionRequest(BaseModel):
+    name: str
+    station_name: str
+    latitude: float
+    longitude: float
+    start_date: str  # YYYY-MM-DD
+    end_date: str
+    target_team_size: int
+    status: Optional[str] = "Active"
+
+class CreateInventoryItemRequest(BaseModel):
+    name: str
+    category: str  # Fuel, Ration, Spares, Medical, Equipment
+    quantity: float
+    unit: str
+    min_required: float
+    daily_use_per_person: float
+    location_station: str
+    cold_factor_sensitivity: Optional[float] = 1.0
+
+class CreateCargoRequest(BaseModel):
+    shipment_code: str
+    title: str
+    weight_kg: float
+    volume_m3: float
+    priority: str  # Critical, High, Medium, Low
+    status: Optional[str] = "Pending"
+    expedition_id: Optional[int] = None
+
+class CreateVehicleRequest(BaseModel):
+    name: str
+    type: str  # Sno-Cat, Helicopter, Quad
+    latitude: float
+    longitude: float
+    weather_limit: str
+    station_name: str
+    status: Optional[str] = "Available"
+
 class SOSRequest(BaseModel):
     skill_needed: str
     latitude: float
     longitude: float
-    performed_by: Optional[str] = "Team Member"
 
+# --- Root & Health Routes ---
 @app.get("/")
 def read_root():
     return {
         "app": "PolarOps Digital Twin Engine",
-        "stations": ["Maitri", "Bharati"],
-        "status": "Operational"
+        "status": "Operational",
+        "mode": "Zero Mock Data"
     }
 
 @app.get("/health")
@@ -70,7 +132,7 @@ def health_check(db: Session = Depends(get_db)):
     except Exception as e:
         db_status = f"error: {str(e)}"
 
-    db_type = engine.name  # 'sqlite' or 'postgresql'
+    db_type = engine.name
     db_url_display = str(engine.url)
     if "@" in db_url_display:
         db_url_display = db_url_display.split("@")[-1]
@@ -87,31 +149,25 @@ def health_check(db: Session = Depends(get_db)):
         }
     }
 
-# --- Auth Routes ---
+# --- Real Auth & User Management Routes ---
 @app.post("/auth/login")
 def login(req: LoginRequest, db: Session = Depends(get_db)):
-    query = db.query(models.User)
-    if req.username:
-        user = query.filter(models.User.username == req.username).first()
-    elif req.email:
-        user = query.filter(models.User.email == req.email).first()
-    else:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Username or email is required"
-        )
+    user = None
+    if req.email:
+        user = db.query(models.User).filter(models.User.email == req.email).first()
+    if not user and req.username:
+        user = db.query(models.User).filter(models.User.username == req.username).first()
 
-    if not user or user.hashed_password != req.password:
+    if not user or not verify_password(req.password, user.hashed_password):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid credentials"
+            detail="Invalid email or password"
         )
 
-    role_slug = user.role.lower().replace(" ", "-")
-    mock_token = f"mock-jwt-token-{role_slug}-{user.id}"
+    access_token = create_access_token(data={"sub": user.username, "role": user.role, "user_id": user.id})
 
     return {
-        "access_token": mock_token,
+        "access_token": access_token,
         "token_type": "bearer",
         "user": {
             "id": user.id,
@@ -122,87 +178,344 @@ def login(req: LoginRequest, db: Session = Depends(get_db)):
         }
     }
 
-# --- Dashboard Summary Route ---
-@app.get("/dashboard/summary")
-def get_dashboard_summary(db: Session = Depends(get_db)):
-    # 1. Team Size from Active Expedition
-    active_exp = db.query(models.Expedition).filter(models.Expedition.status == "Active").first()
-    team_size = active_exp.target_team_size if (active_exp and active_exp.target_team_size) else 6
-    station_name = active_exp.station_name if active_exp else "Maitri"
+@app.post("/users")
+def create_user(
+    req: CreateUserRequest,
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    if current_user.role != "Expedition Leader":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only Expedition Leader can provision new user accounts"
+        )
 
-    # 2. Survival Days (Minimum days over Fuel & Ration items at active expedition station)
-    items = db.query(models.InventoryItem).filter(
-        models.InventoryItem.location_station == station_name,
-        models.InventoryItem.category.in_(["Fuel", "Ration"])
-    ).all()
+    existing = db.query(models.User).filter(
+        (models.User.username == req.username) | (models.User.email == req.email)
+    ).first()
+    if existing:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Username or email already exists"
+        )
+
+    new_user = models.User(
+        username=req.username,
+        email=req.email,
+        hashed_password=hash_password(req.password),
+        role=req.role,
+        station_name=req.station_name
+    )
+    db.add(new_user)
+    db.commit()
+    db.refresh(new_user)
+
+    # Sync a Person record for dispatching
+    person = models.Person(
+        name=req.username.capitalize(),
+        role=req.role,
+        skills=req.skills or [],
+        latitude=-70.7660 if req.station_name == "Maitri" else -69.4070,
+        longitude=11.7330 if req.station_name == "Maitri" else 76.1910,
+        station_name=req.station_name,
+        status="Active",
+        user_id=new_user.id
+    )
+    db.add(person)
+    db.commit()
+
+    # Log to Hash Chain
+    last_log = db.query(AuditLog).order_by(AuditLog.id.desc()).first()
+    prev_hash = last_log.hash if last_log else ("0" * 64)
+    now_dt = datetime.now(timezone.utc)
+
+    payload = {"username": new_user.username, "role": new_user.role, "station": new_user.station_name}
+    new_hash = AuditLog.compute_hash("USER_CREATED", current_user.username, f"USER-{new_user.id}", payload, now_dt, prev_hash)
     
-    days_list = []
-    for item in items:
-        daily_burn = team_size * item.daily_use_per_person
-        if daily_burn > 0:
-            days_list.append(item.quantity / daily_burn)
-    
-    survival_days = round(min(days_list), 1) if days_list else 120.0
+    audit_entry = AuditLog(
+        action="USER_CREATED",
+        performed_by=current_user.username,
+        target_resource=f"USER-{new_user.id}",
+        payload=AuditLog.serialize_payload(payload),
+        timestamp=now_dt,
+        prev_hash=prev_hash,
+        hash=new_hash
+    )
+    db.add(audit_entry)
+    db.commit()
 
-    # 3. Aggregated Counts
-    active_expeditions_count = db.query(models.Expedition).filter(models.Expedition.status == "Active").count()
-    cargo_in_transit_count = db.query(models.CargoShipment).filter(models.CargoShipment.status == "In-Transit").count()
-    personnel_on_field_count = db.query(models.Person).filter(models.Person.status.in_(["Active", "On-Mission"])).count()
-    
-    # Low stock count: quantity <= min_required
-    all_inventory = db.query(models.InventoryItem).all()
-    low_stock_count = sum(1 for i in all_inventory if i.quantity <= i.min_required)
+    return {"message": "User account created successfully", "user_id": new_user.id}
 
-    # 4. Latest 5 Alerts
-    latest_alerts_query = db.query(models.Alert).order_by(models.Alert.created_at.desc()).limit(5).all()
-    latest_alerts = [
-        {
-            "id": a.id,
-            "title": a.title,
-            "message": a.message,
-            "severity": a.severity,
-            "alert_type": a.alert_type,
-            "status": a.status,
-            "created_at": a.created_at.isoformat() if a.created_at else None
-        }
-        for a in latest_alerts_query
-    ]
+@app.patch("/me/location")
+def update_user_location(
+    req: LocationUpdateRequest,
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    now_dt = datetime.now(timezone.utc)
+    current_user.latitude = req.latitude
+    current_user.longitude = req.longitude
+    current_user.last_location_update = now_dt
 
-    # 5. Weather Mock Object
-    weather = {
-        "temperature": -24.5,
-        "unit": "°C",
-        "wind_chill": -38.0,
-        "station": station_name,
-        "blizzard_warning": "Blizzard Level 2 Warning: Winds > 65 knots expected in 4 hours"
-    }
+    # Sync to Person record
+    person = db.query(models.Person).filter(models.Person.user_id == current_user.id).first()
+    if not person:
+        person = models.Person(
+            name=current_user.username,
+            role=current_user.role,
+            skills=[],
+            latitude=req.latitude,
+            longitude=req.longitude,
+            station_name=current_user.station_name or "Maitri",
+            status="Active",
+            user_id=current_user.id,
+            last_location_update=now_dt
+        )
+        db.add(person)
+    else:
+        person.latitude = req.latitude
+        person.longitude = req.longitude
+        person.last_location_update = now_dt
+
+    db.commit()
+    return {"status": "updated", "latitude": req.latitude, "longitude": req.longitude, "updated_at": now_dt.isoformat()}
+
+@app.put("/me/profile")
+def update_user_profile(
+    req: ProfileUpdateRequest,
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    person = db.query(models.Person).filter(models.Person.user_id == current_user.id).first()
+    if person:
+        if req.skills is not None:
+            person.skills = req.skills
+        if req.role:
+            person.role = req.role
+        if req.phone:
+            person.phone = req.phone
+        db.commit()
+    return {"status": "profile_updated"}
+
+# --- Expeditions CRUD ---
+@app.post("/expeditions")
+def create_expedition(
+    req: CreateExpeditionRequest,
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    if req.status == "Active":
+        db.query(models.Expedition).filter(models.Expedition.status == "Active").update({"status": "Completed"})
+
+    start_d = datetime.strptime(req.start_date, "%Y-%m-%d").date()
+    end_d = datetime.strptime(req.end_date, "%Y-%m-%d").date()
+
+    exp = models.Expedition(
+        name=req.name,
+        station_name=req.station_name,
+        start_date=start_d,
+        end_date=end_d,
+        status=req.status or "Active",
+        target_team_size=req.target_team_size
+    )
+    db.add(exp)
+    db.commit()
+    db.refresh(exp)
+
+    # Audit log
+    last_log = db.query(AuditLog).order_by(AuditLog.id.desc()).first()
+    prev_hash = last_log.hash if last_log else ("0" * 64)
+    now_dt = datetime.now(timezone.utc)
+    payload = {"expedition_id": exp.id, "name": exp.name, "target_team_size": exp.target_team_size}
+    new_hash = AuditLog.compute_hash("EXPEDITION_CREATED", current_user.username, f"EXPEDITION-{exp.id}", payload, now_dt, prev_hash)
+
+    audit = AuditLog(
+        action="EXPEDITION_CREATED",
+        performed_by=current_user.username,
+        target_resource=f"EXPEDITION-{exp.id}",
+        payload=AuditLog.serialize_payload(payload),
+        timestamp=now_dt,
+        prev_hash=prev_hash,
+        hash=new_hash
+    )
+    db.add(audit)
+    db.commit()
 
     return {
-        "survival_days": survival_days,
-        "active_expeditions": active_expeditions_count,
-        "cargo_in_transit": cargo_in_transit_count,
-        "personnel_on_field": personnel_on_field_count,
-        "low_stock_items": low_stock_count,
-        "team_size": team_size,
-        "latest_alerts": latest_alerts,
-        "weather": weather
+        "id": exp.id,
+        "name": exp.name,
+        "station_name": exp.station_name,
+        "start_date": exp.start_date.isoformat(),
+        "end_date": exp.end_date.isoformat(),
+        "target_team_size": exp.target_team_size,
+        "status": exp.status
     }
 
-# --- Real SOS Emergency Dispatch Route ---
+@app.get("/expeditions")
+def get_expeditions(db: Session = Depends(get_db)):
+    return db.query(models.Expedition).order_by(models.Expedition.id.desc()).all()
+
+# --- Inventory CRUD ---
+@app.post("/inventory")
+def create_inventory_item(
+    req: CreateInventoryItemRequest,
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    item = models.InventoryItem(
+        name=req.name,
+        category=req.category,
+        quantity=req.quantity,
+        unit=req.unit,
+        min_required=req.min_required,
+        daily_use_per_person=req.daily_use_per_person,
+        location_station=req.location_station,
+        cold_factor_sensitivity=req.cold_factor_sensitivity or 1.0
+    )
+    db.add(item)
+    db.commit()
+    db.refresh(item)
+
+    # Audit log
+    last_log = db.query(AuditLog).order_by(AuditLog.id.desc()).first()
+    prev_hash = last_log.hash if last_log else ("0" * 64)
+    now_dt = datetime.now(timezone.utc)
+    payload = {"item_id": item.id, "name": item.name, "quantity": item.quantity}
+    new_hash = AuditLog.compute_hash("INVENTORY_ADDED", current_user.username, f"INVENTORY-{item.id}", payload, now_dt, prev_hash)
+
+    audit = AuditLog(
+        action="INVENTORY_ADDED",
+        performed_by=current_user.username,
+        target_resource=f"INVENTORY-{item.id}",
+        payload=AuditLog.serialize_payload(payload),
+        timestamp=now_dt,
+        prev_hash=prev_hash,
+        hash=new_hash
+    )
+    db.add(audit)
+    db.commit()
+
+    return {
+        "id": item.id,
+        "name": item.name,
+        "category": item.category,
+        "quantity": item.quantity,
+        "unit": item.unit,
+        "min_required": item.min_required,
+        "daily_use_per_person": item.daily_use_per_person,
+        "location_station": item.location_station
+    }
+
+@app.get("/inventory")
+def get_inventory(db: Session = Depends(get_db)):
+    return db.query(models.InventoryItem).order_by(models.InventoryItem.id.asc()).all()
+
+# --- Cargo CRUD ---
+@app.post("/cargo")
+def create_cargo(
+    req: CreateCargoRequest,
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    cargo = models.CargoShipment(
+        shipment_code=req.shipment_code,
+        title=req.title,
+        weight_kg=req.weight_kg,
+        volume_m3=req.volume_m3,
+        priority=req.priority,
+        status=req.status or "Pending",
+        expedition_id=req.expedition_id
+    )
+    db.add(cargo)
+    db.commit()
+    db.refresh(cargo)
+    return {
+        "id": cargo.id,
+        "shipment_code": cargo.shipment_code,
+        "title": cargo.title,
+        "weight_kg": cargo.weight_kg,
+        "volume_m3": cargo.volume_m3,
+        "priority": cargo.priority,
+        "status": cargo.status
+    }
+
+@app.get("/cargo")
+def get_cargo(db: Session = Depends(get_db)):
+    return db.query(models.CargoShipment).order_by(models.CargoShipment.id.desc()).all()
+
+# --- Vehicles CRUD ---
+@app.post("/vehicles")
+def create_vehicle(
+    req: CreateVehicleRequest,
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    v = models.Vehicle(
+        name=req.name,
+        type=req.type,
+        latitude=req.latitude,
+        longitude=req.longitude,
+        weather_limit=req.weather_limit,
+        station_name=req.station_name,
+        status=req.status or "Available"
+    )
+    db.add(v)
+    db.commit()
+    db.refresh(v)
+    return {
+        "id": v.id,
+        "name": v.name,
+        "type": v.type,
+        "latitude": v.latitude,
+        "longitude": v.longitude,
+        "status": v.status,
+        "weather_limit": v.weather_limit,
+        "station_name": v.station_name
+    }
+
+
+@app.get("/vehicles")
+def get_vehicles(db: Session = Depends(get_db)):
+    return db.query(models.Vehicle).all()
+
+# --- People Route ---
+@app.get("/people")
+def get_people(db: Session = Depends(get_db)):
+    return db.query(models.Person).all()
+
+# --- Alerts Route ---
+@app.get("/alerts")
+def get_alerts(db: Session = Depends(get_db)):
+    return db.query(models.Alert).order_by(models.Alert.created_at.desc()).all()
+
+# --- Real SOS Dispatch Route with 10-Min Location Freshness Filter ---
 @app.post("/sos")
-def trigger_sos_dispatch(req: SOSRequest, db: Session = Depends(get_db)):
+def trigger_sos(
+    req: SOSRequest,
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
     skill_target = req.skill_needed.lower()
-    
-    # 1. Find nearest Person with required skill
-    all_people = db.query(models.Person).all()
+    cutoff_time = datetime.now(timezone.utc) - timedelta(minutes=10)
+
+    # Query all People who have updated location in the LAST 10 MINUTES
+    fresh_people = db.query(models.Person).filter(
+        (models.Person.last_location_update >= cutoff_time) |
+        (models.Person.updated_at >= cutoff_time)
+    ).all()
+
+    # Filter for people matching skill_needed
     matching_people = []
-    for p in all_people:
+    for p in fresh_people:
         skills_lower = [s.lower() for s in (p.skills or [])]
-        if skill_target in skills_lower or skill_target in p.role.lower():
+        if skill_target in skills_lower or skill_target in (p.role or "").lower():
             matching_people.append(p)
-    
+
     if not matching_people:
-        matching_people = all_people  # fallback to all personnel if no skill match
+        return {
+            "status": "No Responder Available",
+            "message": f"No responder with '{req.skill_needed}' skill has updated location in the last 10 minutes."
+        }
 
     nearest_person = None
     min_person_dist = float("inf")
@@ -215,7 +528,7 @@ def trigger_sos_dispatch(req: SOSRequest, db: Session = Depends(get_db)):
     if nearest_person:
         nearest_person.status = "On-Mission"
 
-    # 2. Find nearest Available Vehicle
+    # Find nearest Available Vehicle
     available_vehicles = db.query(models.Vehicle).filter(models.Vehicle.status == "Available").all()
     if not available_vehicles:
         available_vehicles = db.query(models.Vehicle).all()
@@ -231,10 +544,10 @@ def trigger_sos_dispatch(req: SOSRequest, db: Session = Depends(get_db)):
     if nearest_vehicle:
         nearest_vehicle.status = "Dispatched"
 
-    # 3. Create Critical Alert
-    responder_name = nearest_person.name if nearest_person else "Base Rescue Team"
+    # Create Alert
+    responder_name = nearest_person.name if nearest_person else "Base Team"
     vehicle_name = nearest_vehicle.name if nearest_vehicle else "Emergency Sno-Cat"
-    
+
     new_alert = models.Alert(
         alert_type="SOS",
         title=f"SOS Dispatch - {req.skill_needed.capitalize()} Required",
@@ -248,33 +561,24 @@ def trigger_sos_dispatch(req: SOSRequest, db: Session = Depends(get_db)):
     db.commit()
     db.refresh(new_alert)
 
-    # 4. Write SHA-256 Audit Log Entry
+    # Hash Chain Audit
     last_log = db.query(AuditLog).order_by(AuditLog.id.desc()).first()
     prev_hash = last_log.hash if last_log else ("0" * 64)
     now_dt = datetime.now(timezone.utc)
-    
+
     payload_dict = {
         "alert_id": new_alert.id,
         "skill_requested": req.skill_needed,
         "responder": responder_name,
         "responder_distance_km": min_person_dist,
         "vehicle": vehicle_name,
-        "vehicle_distance_km": min_vehicle_dist,
-        "coordinates": {"lat": req.latitude, "long": req.longitude}
+        "vehicle_distance_km": min_vehicle_dist
     }
-    
-    new_hash = AuditLog.compute_hash(
-        action="SOS_DISPATCH",
-        performed_by=req.performed_by or "Team Member",
-        target_resource=f"ALERT-{new_alert.id}",
-        payload=payload_dict,
-        timestamp=now_dt,
-        prev_hash=prev_hash
-    )
 
+    new_hash = AuditLog.compute_hash("SOS_DISPATCH", current_user.username, f"ALERT-{new_alert.id}", payload_dict, now_dt, prev_hash)
     audit_entry = AuditLog(
         action="SOS_DISPATCH",
-        performed_by=req.performed_by or "Team Member",
+        performed_by=current_user.username,
         target_resource=f"ALERT-{new_alert.id}",
         payload=AuditLog.serialize_payload(payload_dict),
         timestamp=now_dt,
@@ -295,28 +599,91 @@ def trigger_sos_dispatch(req: SOSRequest, db: Session = Depends(get_db)):
         "audit_hash": audit_entry.hash
     }
 
-# --- Audit Chain Verification Route ---
+# --- Strict DB-Computed Dashboard Summary Route ---
+@app.get("/dashboard/summary")
+async def get_dashboard_summary(db: Session = Depends(get_db)):
+    active_exp = db.query(models.Expedition).filter(models.Expedition.status == "Active").first()
+    
+    # 1. Survival Days computed ONLY from active station's Fuel & Ration items
+    survival_days = None
+    weather_data = None
+    
+    if active_exp:
+        station_name = active_exp.station_name
+        team_size = active_exp.target_team_size or 6
+
+        # Query items at station
+        station_items = db.query(models.InventoryItem).filter(
+            models.InventoryItem.location_station == station_name,
+            models.InventoryItem.category.in_(["Fuel", "Ration"])
+        ).all()
+
+        days_list = []
+        for item in station_items:
+            daily_burn = team_size * item.daily_use_per_person
+            if daily_burn > 0:
+                days_list.append(item.quantity / daily_burn)
+
+        if days_list:
+            survival_days = round(min(days_list), 1)
+
+        exp_lat = getattr(active_exp, 'latitude', None)
+        if exp_lat is None:
+            exp_lat = -70.7660 if active_exp.station_name == "Maitri" else -69.4070
+        
+        exp_lon = getattr(active_exp, 'longitude', None)
+        if exp_lon is None:
+            exp_lon = 11.7330 if active_exp.station_name == "Maitri" else 76.1910
+
+        # 2. Real Live Weather from Open-Meteo
+        weather_data = await fetch_real_weather(
+            latitude=exp_lat,
+            longitude=exp_lon,
+            station_name=station_name
+        )
+
+
+    # 3. Personnel on Field: Count users/people with location update in the LAST 10 MINUTES
+    cutoff_10m = datetime.now(timezone.utc) - timedelta(minutes=10)
+    personnel_on_field_count = db.query(models.User).filter(
+        models.User.last_location_update >= cutoff_10m
+    ).count()
+
+    # 4. Aggregated Counts
+    active_expeditions_count = db.query(models.Expedition).filter(models.Expedition.status == "Active").count()
+    cargo_in_transit_count = db.query(models.CargoShipment).filter(models.CargoShipment.status == "In-Transit").count()
+    
+    all_inventory = db.query(models.InventoryItem).all()
+    low_stock_count = sum(1 for i in all_inventory if i.quantity <= i.min_required)
+
+    # 5. Latest 5 Alerts
+    latest_alerts_query = db.query(models.Alert).order_by(models.Alert.created_at.desc()).limit(5).all()
+    latest_alerts = [
+        {
+            "id": a.id,
+            "title": a.title,
+            "message": a.message,
+            "severity": a.severity,
+            "alert_type": a.alert_type,
+            "status": a.status,
+            "created_at": a.created_at.isoformat() if a.created_at else None
+        }
+        for a in latest_alerts_query
+    ]
+
+    return {
+        "survival_days": survival_days,
+        "active_expeditions": active_expeditions_count,
+        "cargo_in_transit": cargo_in_transit_count,
+        "personnel_on_field": personnel_on_field_count,
+        "low_stock_items": low_stock_count,
+        "team_size": active_exp.target_team_size if active_exp else 0,
+        "active_expedition_name": active_exp.name if active_exp else None,
+        "active_station": active_exp.station_name if active_exp else None,
+        "latest_alerts": latest_alerts,
+        "weather": weather_data
+    }
+
 @app.get("/audit/verify")
 def verify_audit_log_chain(db: Session = Depends(get_db)):
     return verify_chain(db)
-
-# --- Entity List GET Routes ---
-@app.get("/inventory")
-def get_inventory(db: Session = Depends(get_db)):
-    return db.query(models.InventoryItem).all()
-
-@app.get("/people")
-def get_people(db: Session = Depends(get_db)):
-    return db.query(models.Person).all()
-
-@app.get("/vehicles")
-def get_vehicles(db: Session = Depends(get_db)):
-    return db.query(models.Vehicle).all()
-
-@app.get("/alerts")
-def get_alerts(db: Session = Depends(get_db)):
-    return db.query(models.Alert).order_by(models.Alert.created_at.desc()).all()
-
-@app.get("/cargo")
-def get_cargo(db: Session = Depends(get_db)):
-    return db.query(models.CargoShipment).all()

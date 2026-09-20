@@ -1,15 +1,45 @@
-import React from 'react';
+import React, { useEffect, useState } from 'react';
 import { View, Text, StyleSheet, TouchableOpacity } from 'react-native';
 import { MaterialIcons } from '@expo/vector-icons';
-import { useApp } from '../context/AppContext';
+import NetInfo from '@react-native-community/netinfo';
+import { useApp, SyncStatus } from '../context/AppContext';
 import { colors, spacing, radius, typography, layout } from '../theme';
+import { BACKEND_URL } from '../config';
 
 interface HeaderProps {
   title: string;
 }
 
 export const Header: React.FC<HeaderProps> = ({ title }) => {
-  const { syncStatus, toggleSyncStatus } = useApp();
+  const { syncStatus, setSyncStatus } = useApp();
+
+  useEffect(() => {
+    const unsubscribe = NetInfo.addEventListener((state) => {
+      if (!state.isConnected) {
+        setSyncStatus('Offline');
+        return;
+      }
+
+      // Test latency to backend API
+      const startTime = Date.now();
+      fetch(`${BACKEND_URL}/health`, { method: 'GET' })
+        .then((res) => {
+          const latency = Date.now() - startTime;
+          if (!res.ok) {
+            setSyncStatus('Offline');
+          } else if (latency > 2000) {
+            setSyncStatus('Low');
+          } else {
+            setSyncStatus('Online');
+          }
+        })
+        .catch(() => {
+          setSyncStatus('Offline');
+        });
+    });
+
+    return () => unsubscribe();
+  }, []);
 
   const getStatusColor = () => {
     switch (syncStatus) {
@@ -29,15 +59,11 @@ export const Header: React.FC<HeaderProps> = ({ title }) => {
       <Text style={styles.title}>{title}</Text>
 
       <View style={styles.rightContainer}>
-        {/* Sync Status Chip */}
-        <TouchableOpacity
-          style={styles.chip}
-          onPress={toggleSyncStatus}
-          activeOpacity={0.7}
-        >
+        {/* Automatic Sync Status Chip */}
+        <View style={styles.chip}>
           <View style={[styles.statusDot, { backgroundColor: getStatusColor() }]} />
           <Text style={styles.chipText}>{syncStatus}</Text>
-        </TouchableOpacity>
+        </View>
 
         {/* Notification Bell */}
         <TouchableOpacity style={styles.iconButton} activeOpacity={0.7}>
