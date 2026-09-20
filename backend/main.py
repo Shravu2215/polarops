@@ -7,6 +7,7 @@ from typing import Optional, List, Any
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone, timedelta
 import math
+import numpy as np
 
 from database import engine, get_db, Base
 import models
@@ -1121,3 +1122,224 @@ def verify_audit_chain(
     db: Session = Depends(get_db)
 ):
     return models.audit.verify_chain(db)
+
+# --- What-If Simulator (NumPy Monte Carlo Stockout Engine) ---
+class SimulateRequest(BaseModel):
+    resupply_in_days: float
+    delay_days: Optional[float] = 0.0
+    blizzard_days: Optional[float] = 0.0
+    fuel_loss_percent: Optional[float] = 0.0
+    temperature: Optional[float] = None
+    runs: Optional[int] = 1000
+
+def run_monte_carlo_stockout_simulation(
+    item_name: str,
+    item_category: str,
+    available_qty: float,
+    unit: str,
+    daily_use_per_person: float,
+    cold_factor_sensitivity: float,
+    team_size: int,
+    temp_c: float,
+    resupply_in_days: float,
+    delay_days: float,
+    blizzard_days: float,
+    fuel_loss_percent: float,
+    runs: int = 1000
+) -> dict:
+    """
+    Single documented Monte Carlo simulation function calculating stockout probability
+    and P10/P50/P90 days to stockout using NumPy.
+    Daily consumption noise: Lognormal(sigma=0.10) (~10% daily variance).
+    Resupply arrival day jitter: Normal(mean=0, sigma=1.0 day).
+    """
+    cold_factor = calculate_cold_factor(temp_c, cold_factor_sensitivity)
+    base_daily_burn = team_size * daily_use_per_person * cold_factor
+
+    effective_initial_qty = available_qty
+    if item_category.lower() == "fuel" and fuel_loss_percent > 0:
+        effective_initial_qty = max(0.0, available_qty * (1.0 - (fuel_loss_percent / 100.0)))
+
+    if base_daily_burn <= 0 or effective_initial_qty <= 0:
+        return {
+            "name": item_name,
+            "category": item_category,
+            "available_quantity": round(effective_initial_qty, 1),
+            "unit": unit,
+            "cold_factor_used": round(cold_factor, 3),
+            "stockout_probability_percent": 100.0 if effective_initial_qty <= 0 else 0.0,
+            "p10_days": 0.0 if effective_initial_qty <= 0 else 999.0,
+            "p50_days": 0.0 if effective_initial_qty <= 0 else 999.0,
+            "p90_days": 0.0 if effective_initial_qty <= 0 else 999.0,
+            "risk_level": "Critical" if effective_initial_qty <= 0 else "Low"
+        }
+
+    # Arrival day calculation per run with normal jitter (sigma=1 day)
+    target_arrival_base = resupply_in_days + delay_days + blizzard_days
+    arrival_jitters = np.random.normal(loc=0.0, scale=1.0, size=runs)
+    arrival_days = np.maximum(1.0, target_arrival_base + arrival_jitters)
+
+    # Max days to simulate per run
+    max_days = int(np.ceil(np.max(arrival_days))) + 90
+
+    # Daily consumption noise matrix: Lognormal(mean=-0.005, sigma=0.10)
+    daily_noise = np.random.lognormal(mean=-0.005, sigma=0.10, size=(runs, max_days))
+    daily_burn_matrix = base_daily_burn * daily_noise
+    cum_burn = np.cumsum(daily_burn_matrix, axis=1)
+
+    stockout_occurred_count = 0
+    days_to_stockout_list = []
+
+    for r in range(runs):
+        target_arrival = arrival_days[r]
+        stockout_indices = np.where(cum_burn[r, :] >= effective_initial_qty)[0]
+        if len(stockout_indices) > 0:
+            stockout_day = float(stockout_indices[0] + 1)
+        else:
+            stockout_day = float(max_days)
+
+        days_to_stockout_list.append(stockout_day)
+
+        if stockout_day < target_arrival:
+            stockout_occurred_count += 1
+
+    stockout_prob_pct = round((stockout_occurred_count / runs) * 100.0, 1)
+    p10_days = round(float(np.percentile(days_to_stockout_list, 10)), 1)
+    p50_days = round(float(np.percentile(days_to_stockout_list, 50)), 1)
+    p90_days = round(float(np.percentile(days_to_stockout_list, 90)), 1)
+
+    if stockout_prob_pct < 10.0:
+        risk_level = "Low"
+    elif stockout_prob_pct <= 50.0:
+        risk_level = "Elevated"
+    else:
+        risk_level = "Critical"
+
+    return {
+        "name": item_name,
+        "category": item_category,
+        "available_quantity": round(effective_initial_qty, 1),
+        "unit": unit,
+        "cold_factor_used": round(cold_factor, 3),
+        "stockout_probability_percent": stockout_prob_pct,
+        "p10_days": p10_days,
+        "p50_days": p50_days,
+        "p90_days": p90_days,
+        "risk_level": risk_level
+    }
+
+@app.post("/simulate")
+def run_whatif_simulation(
+    req: SimulateRequest,
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    active_exp = db.query(models.Expedition).filter(models.Expedition.status == "Active").first()
+    station_name = active_exp.station_name if active_exp else "Maitri"
+    team_size = active_exp.target_team_size if (active_exp and active_exp.target_team_size) else 6
+
+    actual_temp = req.temperature
+    if actual_temp is None:
+        if active_exp:
+            exp_lat = getattr(active_exp, 'latitude', None) or (-70.7660 if station_name == "Maitri" else -69.4070)
+            exp_lon = getattr(active_exp, 'longitude', None) or (11.7330 if station_name == "Maitri" else 76.1910)
+            w_res = get_polar_weather(exp_lat, exp_lon, station_name)
+            actual_temp = w_res.get("temperature", -30.0)
+        else:
+            actual_temp = -30.0
+
+    items = db.query(models.InventoryItem).filter(
+        models.InventoryItem.location_station == station_name,
+        models.InventoryItem.category.in_(["Fuel", "Ration"])
+    ).all()
+
+    if not items:
+        items = db.query(models.InventoryItem).filter(
+            models.InventoryItem.category.in_(["Fuel", "Ration"])
+        ).all()
+
+    runs_cnt = req.runs or 1000
+
+    baseline_results = []
+    scenario_results = []
+
+    for item in items:
+        base_res = run_monte_carlo_stockout_simulation(
+            item_name=item.name,
+            item_category=item.category,
+            available_qty=item.quantity,
+            unit=item.unit,
+            daily_use_per_person=item.daily_use_per_person,
+            cold_factor_sensitivity=item.cold_factor_sensitivity or 1.0,
+            team_size=team_size,
+            temp_c=actual_temp,
+            resupply_in_days=req.resupply_in_days,
+            delay_days=0.0,
+            blizzard_days=0.0,
+            fuel_loss_percent=0.0,
+            runs=runs_cnt
+        )
+        baseline_results.append(base_res)
+
+        scen_res = run_monte_carlo_stockout_simulation(
+            item_name=item.name,
+            item_category=item.category,
+            available_qty=item.quantity,
+            unit=item.unit,
+            daily_use_per_person=item.daily_use_per_person,
+            cold_factor_sensitivity=item.cold_factor_sensitivity or 1.0,
+            team_size=team_size,
+            temp_c=actual_temp,
+            resupply_in_days=req.resupply_in_days,
+            delay_days=req.delay_days or 0.0,
+            blizzard_days=req.blizzard_days or 0.0,
+            fuel_loss_percent=req.fuel_loss_percent or 0.0,
+            runs=runs_cnt
+        )
+        scenario_results.append(scen_res)
+
+    assumptions_dict = {
+        "monte_carlo_runs": runs_cnt,
+        "daily_consumption_noise": "Lognormal(sigma=0.10, ~10% daily variation)",
+        "resupply_delay_jitter": "Normal(mean=0, sigma=1.0 day)",
+        "cold_factor_formula": "1 + (degrees_below_zero * 0.01 * sensitivity)"
+    }
+
+    # Log to Hash Chain Audit
+    last_log = db.query(models.AuditLog).order_by(models.AuditLog.id.desc()).first()
+    prev_hash = last_log.hash if last_log else ("0" * 64)
+    now_dt = datetime.now(timezone.utc)
+    payload_dict = {
+        "resupply_in_days": req.resupply_in_days,
+        "delay_days": req.delay_days,
+        "blizzard_days": req.blizzard_days,
+        "fuel_loss_percent": req.fuel_loss_percent,
+        "temperature": actual_temp,
+        "runs": runs_cnt
+    }
+    new_hash = models.AuditLog.compute_hash("SIMULATION_RUN", current_user.username, "WHATIF_SIMULATOR", payload_dict, now_dt, prev_hash)
+    audit_entry = models.AuditLog(
+        action="SIMULATION_RUN",
+        performed_by=current_user.username,
+        target_resource="WHATIF_SIMULATOR",
+        payload=models.AuditLog.serialize_payload(payload_dict),
+        timestamp=now_dt,
+        prev_hash=prev_hash,
+        hash=new_hash
+    )
+    db.add(audit_entry)
+    db.commit()
+
+    return {
+        "active_expedition": active_exp.name if active_exp else "Default Station Baseline",
+        "station_name": station_name,
+        "team_size": team_size,
+        "temperature_c": round(actual_temp, 1),
+        "resupply_in_days": req.resupply_in_days,
+        "delay_days": req.delay_days or 0.0,
+        "blizzard_days": req.blizzard_days or 0.0,
+        "fuel_loss_percent": req.fuel_loss_percent or 0.0,
+        "assumptions": assumptions_dict,
+        "baseline_items": baseline_results,
+        "scenario_items": scenario_results
+    }

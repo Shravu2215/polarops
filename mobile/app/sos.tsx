@@ -84,7 +84,7 @@ export default function SOSScreen() {
         <View style={styles.alertBanner}>
           <MaterialIcons name="warning" size={24} color={colors.dangerRed} />
           <Text style={styles.alertBannerText}>
-            Priority Sync Active (QoS 2) — SOS messages bypass low-bandwidth delays.
+            Emergency alerts are sent immediately and prioritized.
           </Text>
         </View>
 
