@@ -7,3 +7,6 @@ venv/
 .vscode/
 node_modules/
 .expo/
+.claude/
+AGENTS.md
+CLAUDE.md
