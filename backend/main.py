@@ -54,16 +54,23 @@ def health_check(db: Session = Depends(get_db)):
     except Exception as e:
         db_status = f"error: {str(e)}"
 
+    db_type = engine.name  # 'sqlite' or 'postgresql'
+    db_url_display = str(engine.url)
+    if "@" in db_url_display:
+        db_url_display = db_url_display.split("@")[-1]
+
     return {
         "status": "ok",
         "service": "PolarOps Backend",
         "database": db_status,
-        "database_url": config.DATABASE_URL.split("@")[-1] if "@" in config.DATABASE_URL else config.DATABASE_URL,
+        "database_type": db_type,
+        "database_url": db_url_display,
         "mqtt": {
             "broker": config.MQTT_BROKER_HOST,
             "port": config.MQTT_BROKER_PORT
         }
     }
+
 
 # --- Auth Routes ---
 @app.post("/auth/login")
