@@ -821,3 +821,89 @@ async def get_dashboard_summary(current_user: models.User = Depends(get_current_
 @app.get("/audit/verify")
 def verify_audit_log_chain(db: Session = Depends(get_db)):
     return verify_chain(db)
+
+def calculate_cold_factor(temperature_c: float, sensitivity: float = 1.0) -> float:
+    """
+    Calculates cold factor burn multiplier for Antarctic extreme weather.
+    For every 1°C temperature drop below 0°C, burn rate increases linearly by 1% * sensitivity factor.
+    """
+    degrees_below_zero = max(0.0, -temperature_c)
+    sens = sensitivity if sensitivity is not None else 1.0
+    return round(1.0 + (degrees_below_zero * 0.01 * sens), 3)
+
+@app.get("/forecast")
+async def get_supply_forecast(
+    temperature: Optional[float] = None,
+    days: Optional[int] = 30,
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    active_exp = db.query(models.Expedition).filter(models.Expedition.status == "Active").first()
+    station_name = active_exp.station_name if active_exp else "Maitri"
+    team_size = active_exp.target_team_size if active_exp else 6
+    days_count = max(1, days or 30)
+
+    # If temperature is not provided, fetch live station weather from Open-Meteo
+    actual_temp = temperature
+    if actual_temp is None:
+        if active_exp:
+            exp_lat = getattr(active_exp, 'latitude', None) or (-70.7660 if station_name == "Maitri" else -69.4070)
+            exp_lon = getattr(active_exp, 'longitude', None) or (11.7330 if station_name == "Maitri" else 76.1910)
+            weather_res = await fetch_real_weather(exp_lat, exp_lon, station_name)
+            if weather_res and "temperature" in weather_res:
+                actual_temp = weather_res["temperature"]
+
+        if actual_temp is None:
+            actual_temp = -30.0  # Default Antarctic temperature fallback
+
+    # Query inventory items for active station
+    items = db.query(models.InventoryItem).filter(
+        models.InventoryItem.location_station == station_name
+    ).order_by(models.InventoryItem.id.asc()).all()
+
+    forecast_items = []
+    fuel_ration_days = []
+
+    for item in items:
+        cf = calculate_cold_factor(actual_temp, item.cold_factor_sensitivity)
+        daily_burn = team_size * item.daily_use_per_person * cf
+        required = round(team_size * days_count * item.daily_use_per_person * cf, 1)
+        available = item.quantity
+        shortfall = max(0.0, round(required - available, 1))
+
+        # Status logic
+        if available < required:
+            item_status = "Short"
+        elif available <= (required * 1.2) or available <= item.min_required:
+            item_status = "Low"
+        else:
+            item_status = "OK"
+
+        if item.category in ["Fuel", "Ration"] and daily_burn > 0:
+            fuel_ration_days.append(item.quantity / daily_burn)
+
+        forecast_items.append({
+            "id": item.id,
+            "name": item.name,
+            "category": item.category,
+            "available": item.quantity,
+            "unit": item.unit,
+            "min_required": item.min_required,
+            "daily_use_per_person": item.daily_use_per_person,
+            "cold_factor_sensitivity": item.cold_factor_sensitivity or 1.0,
+            "cold_factor_used": cf,
+            "required": required,
+            "shortfall": shortfall,
+            "status": item_status
+        })
+
+    survival_days = round(min(fuel_ration_days), 1) if fuel_ration_days else None
+
+    return {
+        "temperature_c": actual_temp,
+        "days": days_count,
+        "survival_days": survival_days,
+        "station_name": station_name,
+        "team_size": team_size,
+        "items": forecast_items
+    }
