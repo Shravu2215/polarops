@@ -27,7 +27,9 @@ const styles = StyleSheet.create({
   },
   content: {
     padding: spacing.md,
+    paddingBottom: 100,
   },
+
   placeholderCard: {
     backgroundColor: colors.card,
     borderRadius: radius.card,

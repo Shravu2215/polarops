@@ -74,8 +74,10 @@ const styles = StyleSheet.create({
   },
   content: {
     padding: spacing.md,
+    paddingBottom: 100,
     gap: spacing.md,
   },
+
   userCard: {
     backgroundColor: colors.card,
     borderRadius: radius.card,

@@ -57,8 +57,9 @@ def seed_database(reset: bool = True):
             start_date=date(2025, 11, 15),
             end_date=date(2026, 4, 10),
             status="Active",
-            target_team_size=40
+            target_team_size=6
         )
+
         db.add(expedition)
         db.commit()
         db.refresh(expedition)
@@ -333,7 +334,8 @@ def seed_database(reset: bool = True):
 
         # Entry 2: Expedition creation
         exp_timestamp = datetime(2025, 11, 15, 8, 5, 0, tzinfo=timezone.utc)
-        exp_payload = {"expedition_id": expedition.id, "target_team_size": 40, "station": "Maitri"}
+        exp_payload = {"expedition_id": expedition.id, "target_team_size": 6, "station": "Maitri"}
+
         exp_hash = AuditLog.compute_hash(
             action="EXPEDITION_CREATED",
             performed_by="leader@polarops.in",

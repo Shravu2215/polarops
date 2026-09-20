@@ -96,23 +96,14 @@ export default function LoginScreen() {
 
   return (
     <SafeAreaView style={styles.container}>
-      {/* Top Header with Pinned Flat Settings Gear Icon */}
+      {/* Top Header */}
       <View style={styles.topBar}>
         <View style={styles.appBrandRow}>
           <MaterialIcons name="ac-unit" size={24} color={colors.primary} />
           <Text style={styles.appTitle}>PolarOps</Text>
         </View>
-
-        <TouchableOpacity
-          style={styles.settingsIconButton}
-          onPress={() => {
-            /* Open server config if needed */
-          }}
-          activeOpacity={0.7}
-        >
-          <MaterialIcons name="settings" size={22} color={colors.secondaryText} />
-        </TouchableOpacity>
       </View>
+
 
       {/* Main Container */}
       <View style={styles.content}>

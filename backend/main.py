@@ -5,11 +5,21 @@ from sqlalchemy.orm import Session
 from sqlalchemy import text
 from typing import Optional, List
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
+import math
 
 from database import engine, get_db, Base
 import models
-from models.audit import verify_chain
+from models.audit import verify_chain, AuditLog
 import config
+
+def haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    r = 6371.0  # Earth radius in km
+    dlat = math.radians(lat2 - lat1)
+    dlon = math.radians(lon2 - lon1)
+    a = math.sin(dlat / 2.0)**2 + math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) * math.sin(dlon / 2.0)**2
+    c = 2.0 * math.atan2(math.sqrt(a), math.sqrt(1.0 - a))
+    return round(r * c, 2)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -31,11 +41,17 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Pydantic Schemas for Auth
+# Schemas
 class LoginRequest(BaseModel):
     username: Optional[str] = None
     email: Optional[str] = None
     password: str
+
+class SOSRequest(BaseModel):
+    skill_needed: str
+    latitude: float
+    longitude: float
+    performed_by: Optional[str] = "Team Member"
 
 @app.get("/")
 def read_root():
@@ -70,7 +86,6 @@ def health_check(db: Session = Depends(get_db)):
             "port": config.MQTT_BROKER_PORT
         }
     }
-
 
 # --- Auth Routes ---
 @app.post("/auth/login")
@@ -112,10 +127,15 @@ def login(req: LoginRequest, db: Session = Depends(get_db)):
 def get_dashboard_summary(db: Session = Depends(get_db)):
     # 1. Team Size from Active Expedition
     active_exp = db.query(models.Expedition).filter(models.Expedition.status == "Active").first()
-    team_size = active_exp.target_team_size if (active_exp and active_exp.target_team_size) else 40
+    team_size = active_exp.target_team_size if (active_exp and active_exp.target_team_size) else 6
+    station_name = active_exp.station_name if active_exp else "Maitri"
 
-    # 2. Survival Days (Minimum days over Fuel & Ration items)
-    items = db.query(models.InventoryItem).filter(models.InventoryItem.category.in_(["Fuel", "Ration"])).all()
+    # 2. Survival Days (Minimum days over Fuel & Ration items at active expedition station)
+    items = db.query(models.InventoryItem).filter(
+        models.InventoryItem.location_station == station_name,
+        models.InventoryItem.category.in_(["Fuel", "Ration"])
+    ).all()
+    
     days_list = []
     for item in items:
         daily_burn = team_size * item.daily_use_per_person
@@ -153,7 +173,7 @@ def get_dashboard_summary(db: Session = Depends(get_db)):
         "temperature": -24.5,
         "unit": "°C",
         "wind_chill": -38.0,
-        "station": active_exp.station_name if active_exp else "Maitri",
+        "station": station_name,
         "blizzard_warning": "Blizzard Level 2 Warning: Winds > 65 knots expected in 4 hours"
     }
 
@@ -168,8 +188,114 @@ def get_dashboard_summary(db: Session = Depends(get_db)):
         "weather": weather
     }
 
-# --- Audit Chain Verification Route ---
+# --- Real SOS Emergency Dispatch Route ---
+@app.post("/sos")
+def trigger_sos_dispatch(req: SOSRequest, db: Session = Depends(get_db)):
+    skill_target = req.skill_needed.lower()
+    
+    # 1. Find nearest Person with required skill
+    all_people = db.query(models.Person).all()
+    matching_people = []
+    for p in all_people:
+        skills_lower = [s.lower() for s in (p.skills or [])]
+        if skill_target in skills_lower or skill_target in p.role.lower():
+            matching_people.append(p)
+    
+    if not matching_people:
+        matching_people = all_people  # fallback to all personnel if no skill match
 
+    nearest_person = None
+    min_person_dist = float("inf")
+    for p in matching_people:
+        dist = haversine_km(req.latitude, req.longitude, p.latitude, p.longitude)
+        if dist < min_person_dist:
+            min_person_dist = dist
+            nearest_person = p
+
+    if nearest_person:
+        nearest_person.status = "On-Mission"
+
+    # 2. Find nearest Available Vehicle
+    available_vehicles = db.query(models.Vehicle).filter(models.Vehicle.status == "Available").all()
+    if not available_vehicles:
+        available_vehicles = db.query(models.Vehicle).all()
+
+    nearest_vehicle = None
+    min_vehicle_dist = float("inf")
+    for v in available_vehicles:
+        dist = haversine_km(req.latitude, req.longitude, v.latitude, v.longitude)
+        if dist < min_vehicle_dist:
+            min_vehicle_dist = dist
+            nearest_vehicle = v
+
+    if nearest_vehicle:
+        nearest_vehicle.status = "Dispatched"
+
+    # 3. Create Critical Alert
+    responder_name = nearest_person.name if nearest_person else "Base Rescue Team"
+    vehicle_name = nearest_vehicle.name if nearest_vehicle else "Emergency Sno-Cat"
+    
+    new_alert = models.Alert(
+        alert_type="SOS",
+        title=f"SOS Dispatch - {req.skill_needed.capitalize()} Required",
+        message=f"Dispatched responder {responder_name} with vehicle {vehicle_name} to ({req.latitude:.4f}, {req.longitude:.4f}).",
+        severity="Critical",
+        latitude=req.latitude,
+        longitude=req.longitude,
+        status="Active"
+    )
+    db.add(new_alert)
+    db.commit()
+    db.refresh(new_alert)
+
+    # 4. Write SHA-256 Audit Log Entry
+    last_log = db.query(AuditLog).order_by(AuditLog.id.desc()).first()
+    prev_hash = last_log.hash if last_log else ("0" * 64)
+    now_dt = datetime.now(timezone.utc)
+    
+    payload_dict = {
+        "alert_id": new_alert.id,
+        "skill_requested": req.skill_needed,
+        "responder": responder_name,
+        "responder_distance_km": min_person_dist,
+        "vehicle": vehicle_name,
+        "vehicle_distance_km": min_vehicle_dist,
+        "coordinates": {"lat": req.latitude, "long": req.longitude}
+    }
+    
+    new_hash = AuditLog.compute_hash(
+        action="SOS_DISPATCH",
+        performed_by=req.performed_by or "Team Member",
+        target_resource=f"ALERT-{new_alert.id}",
+        payload=payload_dict,
+        timestamp=now_dt,
+        prev_hash=prev_hash
+    )
+
+    audit_entry = AuditLog(
+        action="SOS_DISPATCH",
+        performed_by=req.performed_by or "Team Member",
+        target_resource=f"ALERT-{new_alert.id}",
+        payload=AuditLog.serialize_payload(payload_dict),
+        timestamp=now_dt,
+        prev_hash=prev_hash,
+        hash=new_hash
+    )
+    db.add(audit_entry)
+    db.commit()
+
+    return {
+        "status": "Dispatched",
+        "responder_name": responder_name,
+        "responder_role": nearest_person.role if nearest_person else "Responder",
+        "responder_distance_km": min_person_dist,
+        "vehicle_name": vehicle_name,
+        "vehicle_distance_km": min_vehicle_dist,
+        "alert_id": new_alert.id,
+        "audit_hash": audit_entry.hash
+    }
+
+# --- Audit Chain Verification Route ---
 @app.get("/audit/verify")
 def verify_audit_log_chain(db: Session = Depends(get_db)):
     return verify_chain(db)
@@ -177,25 +303,20 @@ def verify_audit_log_chain(db: Session = Depends(get_db)):
 # --- Entity List GET Routes ---
 @app.get("/inventory")
 def get_inventory(db: Session = Depends(get_db)):
-    items = db.query(models.InventoryItem).all()
-    return items
+    return db.query(models.InventoryItem).all()
 
 @app.get("/people")
 def get_people(db: Session = Depends(get_db)):
-    people = db.query(models.Person).all()
-    return people
+    return db.query(models.Person).all()
 
 @app.get("/vehicles")
 def get_vehicles(db: Session = Depends(get_db)):
-    vehicles = db.query(models.Vehicle).all()
-    return vehicles
+    return db.query(models.Vehicle).all()
 
 @app.get("/alerts")
 def get_alerts(db: Session = Depends(get_db)):
-    alerts = db.query(models.Alert).all()
-    return alerts
+    return db.query(models.Alert).order_by(models.Alert.created_at.desc()).all()
 
 @app.get("/cargo")
 def get_cargo(db: Session = Depends(get_db)):
-    shipments = db.query(models.CargoShipment).all()
-    return shipments
+    return db.query(models.CargoShipment).all()
