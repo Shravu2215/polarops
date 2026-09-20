@@ -107,7 +107,69 @@ def login(req: LoginRequest, db: Session = Depends(get_db)):
         }
     }
 
+# --- Dashboard Summary Route ---
+@app.get("/dashboard/summary")
+def get_dashboard_summary(db: Session = Depends(get_db)):
+    # 1. Team Size from Active Expedition
+    active_exp = db.query(models.Expedition).filter(models.Expedition.status == "Active").first()
+    team_size = active_exp.target_team_size if (active_exp and active_exp.target_team_size) else 40
+
+    # 2. Survival Days (Minimum days over Fuel & Ration items)
+    items = db.query(models.InventoryItem).filter(models.InventoryItem.category.in_(["Fuel", "Ration"])).all()
+    days_list = []
+    for item in items:
+        daily_burn = team_size * item.daily_use_per_person
+        if daily_burn > 0:
+            days_list.append(item.quantity / daily_burn)
+    
+    survival_days = round(min(days_list), 1) if days_list else 120.0
+
+    # 3. Aggregated Counts
+    active_expeditions_count = db.query(models.Expedition).filter(models.Expedition.status == "Active").count()
+    cargo_in_transit_count = db.query(models.CargoShipment).filter(models.CargoShipment.status == "In-Transit").count()
+    personnel_on_field_count = db.query(models.Person).filter(models.Person.status.in_(["Active", "On-Mission"])).count()
+    
+    # Low stock count: quantity <= min_required
+    all_inventory = db.query(models.InventoryItem).all()
+    low_stock_count = sum(1 for i in all_inventory if i.quantity <= i.min_required)
+
+    # 4. Latest 5 Alerts
+    latest_alerts_query = db.query(models.Alert).order_by(models.Alert.created_at.desc()).limit(5).all()
+    latest_alerts = [
+        {
+            "id": a.id,
+            "title": a.title,
+            "message": a.message,
+            "severity": a.severity,
+            "alert_type": a.alert_type,
+            "status": a.status,
+            "created_at": a.created_at.isoformat() if a.created_at else None
+        }
+        for a in latest_alerts_query
+    ]
+
+    # 5. Weather Mock Object
+    weather = {
+        "temperature": -24.5,
+        "unit": "°C",
+        "wind_chill": -38.0,
+        "station": active_exp.station_name if active_exp else "Maitri",
+        "blizzard_warning": "Blizzard Level 2 Warning: Winds > 65 knots expected in 4 hours"
+    }
+
+    return {
+        "survival_days": survival_days,
+        "active_expeditions": active_expeditions_count,
+        "cargo_in_transit": cargo_in_transit_count,
+        "personnel_on_field": personnel_on_field_count,
+        "low_stock_items": low_stock_count,
+        "team_size": team_size,
+        "latest_alerts": latest_alerts,
+        "weather": weather
+    }
+
 # --- Audit Chain Verification Route ---
+
 @app.get("/audit/verify")
 def verify_audit_log_chain(db: Session = Depends(get_db)):
     return verify_chain(db)
