@@ -1,44 +1,46 @@
-from datetime import datetime, date
+import sys
+from datetime import datetime, date, timezone
 from database import SessionLocal, engine, Base
 import models
 from models.audit import AuditLog
+from models.vehicle import Vehicle
 
-def seed_database():
-    Base.metadata.drop_all(bind=engine)
-    Base.metadata.create_all(bind=engine)
+def seed_database(reset: bool = True):
+    if reset:
+        Base.metadata.drop_all(bind=engine)
+        Base.metadata.create_all(bind=engine)
 
     db = SessionLocal()
     try:
         print("[+] Seeding PolarOps database with Antarctic data...")
 
-
-        # 1. Users
+        # 1. Users (4 roles)
         users = [
             models.User(
                 username="leader",
                 email="leader@polarops.in",
-                hashed_password="hashed_password_123",  # Demo placeholder
+                hashed_password="password123",  # Demo plain hash
                 role="Expedition Leader",
                 station_name="Maitri"
             ),
             models.User(
                 username="logistics",
                 email="logistics@polarops.in",
-                hashed_password="hashed_password_123",
+                hashed_password="password123",
                 role="Logistics Officer",
                 station_name="Maitri"
             ),
             models.User(
                 username="admin",
                 email="admin@polarops.in",
-                hashed_password="hashed_password_123",
+                hashed_password="password123",
                 role="Base Admin",
                 station_name="Bharati"
             ),
             models.User(
                 username="member",
                 email="member@polarops.in",
-                hashed_password="hashed_password_123",
+                hashed_password="password123",
                 role="Team Member",
                 station_name="Maitri"
             ),
@@ -61,7 +63,7 @@ def seed_database():
         db.commit()
         db.refresh(expedition)
 
-        # 3. Inventory Items
+        # 3. Inventory Items (with daily_use_per_person)
         inventory = [
             models.InventoryItem(
                 name="Polar Diesel Fuel Drums",
@@ -69,6 +71,7 @@ def seed_database():
                 quantity=18500.0,
                 unit="Litres",
                 min_required=5000.0,
+                daily_use_per_person=15.0,  # 15L per person per day
                 location_station="Maitri",
                 cold_factor_sensitivity=1.25
             ),
@@ -78,6 +81,7 @@ def seed_database():
                 quantity=9200.0,
                 unit="Litres",
                 min_required=3000.0,
+                daily_use_per_person=10.0,
                 location_station="Bharati",
                 cold_factor_sensitivity=1.15
             ),
@@ -87,6 +91,7 @@ def seed_database():
                 quantity=4800.0,
                 unit="Packages",
                 min_required=1200.0,
+                daily_use_per_person=3.0,  # 3 packs per person per day
                 location_station="Maitri",
                 cold_factor_sensitivity=1.30
             ),
@@ -96,6 +101,7 @@ def seed_database():
                 quantity=3100.0,
                 unit="Packages",
                 min_required=800.0,
+                daily_use_per_person=2.5,
                 location_station="Bharati",
                 cold_factor_sensitivity=1.20
             ),
@@ -105,6 +111,7 @@ def seed_database():
                 quantity=35.0,
                 unit="Units",
                 min_required=10.0,
+                daily_use_per_person=0.1,
                 location_station="Maitri",
                 cold_factor_sensitivity=1.0
             ),
@@ -114,15 +121,17 @@ def seed_database():
                 quantity=110.0,
                 unit="Boxes",
                 min_required=25.0,
+                daily_use_per_person=0.05,
                 location_station="Maitri",
                 cold_factor_sensitivity=1.0
             ),
             models.InventoryItem(
-                name="Sno-Cat Heavy Rubber Tracks & Drive Belts",
+                name="Sno-Cat Heavy Rubber Tracks & Belts",
                 category="Spares",
                 quantity=14.0,
                 unit="Sets",
                 min_required=4.0,
+                daily_use_per_person=0.02,
                 location_station="Bharati",
                 cold_factor_sensitivity=1.0
             ),
@@ -163,14 +172,14 @@ def seed_database():
         db.add_all(cargo)
         db.commit()
 
-        # 5. People
+        # 5. People (Within 10-50km of Maitri -70.766, 11.733, plus a couple at Bharati -69.407, 76.191)
         people = [
             models.Person(
                 name="Dr. Rahul Sharma",
                 role="Medical Officer",
                 skills=["doctor", "first_aid", "trauma", "hypothermia_care"],
-                latitude=-70.7670,
-                longitude=11.7340,
+                latitude=-70.7800,  # ~2 km from Maitri
+                longitude=11.7450,
                 station_name="Maitri",
                 status="Active",
                 vehicle_assigned="PistenBully 100 Medical",
@@ -181,8 +190,8 @@ def seed_database():
                 name="Vikram Singh",
                 role="Chief Vehicle Mechanic",
                 skills=["mechanic", "welding", "generator_repair", "diesel_engine"],
-                latitude=-70.7610,
-                longitude=11.7290,
+                latitude=-70.8200,  # ~8 km from Maitri
+                longitude=11.8500,
                 station_name="Maitri",
                 status="Active",
                 vehicle_assigned="Sno-Cat Alpha",
@@ -190,34 +199,88 @@ def seed_database():
                 user_id=users[3].id
             ),
             models.Person(
+                name="Dr. Amit Patel",
+                role="Senior Glaciologist",
+                skills=["glaciology", "first_aid", "radio_comm", "field_survey"],
+                latitude=-70.9500,  # ~23 km from Maitri
+                longitude=11.9500,
+                station_name="Maitri",
+                status="On-Mission",
+                vehicle_assigned="Polar Quad 01",
+                phone="+91-9876543213",
+                user_id=None
+            ),
+            models.Person(
+                name="Suresh Verma",
+                role="Logistics Officer",
+                skills=["inventory", "cargo_dispatch", "radio_comm"],
+                latitude=-70.7660,  # At Maitri Base
+                longitude=11.7330,
+                station_name="Maitri",
+                status="Active",
+                vehicle_assigned="None",
+                phone="+91-9876543214",
+                user_id=users[1].id
+            ),
+            models.Person(
                 name="Captain Ananya Roy",
                 role="Helicopter Pilot",
                 skills=["pilot", "navigation", "search_and_rescue", "evacuation"],
-                latitude=-69.4050,
-                longitude=76.1940,
+                latitude=-69.4070,  # Bharati Station (Far away example)
+                longitude=76.1910,
                 station_name="Bharati",
                 status="Standby",
                 vehicle_assigned="Eurocopter AS350",
                 phone="+91-9876543212",
                 user_id=users[2].id
-            ),
-            models.Person(
-                name="Dr. Amit Patel",
-                role="Senior Glaciologist",
-                skills=["glaciology", "first_aid", "radio_comm", "field_survey"],
-                latitude=-70.7750,
-                longitude=11.7420,
-                station_name="Maitri",
-                status="On-Mission",
-                vehicle_assigned="Skidoo Arctic 02",
-                phone="+91-9876543213",
-                user_id=None
             )
         ]
         db.add_all(people)
         db.commit()
 
-        # 6. Alerts
+        # 6. Vehicles (Near Maitri & Bharati)
+        vehicles = [
+            Vehicle(
+                name="Sno-Cat Alpha",
+                type="Sno-Cat",
+                latitude=-70.7700,  # Near Maitri
+                longitude=11.7400,
+                status="Available",
+                weather_limit="Blizzard Level 2",
+                station_name="Maitri"
+            ),
+            Vehicle(
+                name="PistenBully 100 Medical",
+                type="Sno-Cat",
+                latitude=-70.7800,  # Near Maitri
+                longitude=11.7450,
+                status="Available",
+                weather_limit="Blizzard Level 3",
+                station_name="Maitri"
+            ),
+            Vehicle(
+                name="Polar Quad 01",
+                type="Quad",
+                latitude=-70.8200,  # ~8 km from Maitri
+                longitude=11.8500,
+                status="Available",
+                weather_limit="Mild Wind",
+                station_name="Maitri"
+            ),
+            Vehicle(
+                name="Eurocopter AS350",
+                type="Helicopter",
+                latitude=-69.4070,  # At Bharati (Far away example)
+                longitude=76.1910,
+                status="Standby",
+                weather_limit="Clear",
+                station_name="Bharati"
+            ),
+        ]
+        db.add_all(vehicles)
+        db.commit()
+
+        # 7. Alerts
         alerts = [
             models.Alert(
                 alert_type="SOS",
@@ -241,53 +304,53 @@ def seed_database():
         db.add_all(alerts)
         db.commit()
 
-        # 7. Audit Logs Hash Chain
-        # Genesis entry
-        gen_time = datetime.utcnow()
-        gen_timestamp_str = gen_time.isoformat()
-        genesis_prev_hash = "0" * 64
-        genesis_hash = AuditLog.compute_hash(
+        # 8. Deterministic SHA-256 Audit Log Hash Chain
+        # Entry 1: Genesis block
+        gen_timestamp = datetime(2025, 11, 15, 8, 0, 0, tzinfo=timezone.utc)
+        genesis_prev = "0" * 64
+        gen_payload = {"event": "PolarOps Ledger Initialized", "expedition": "44th ISEA"}
+        gen_hash = AuditLog.compute_hash(
             action="GENESIS_BLOCK",
             performed_by="SYSTEM",
             target_resource="SYSTEM",
-            payload="PolarOps Ledger Initialized for 44th ISEA",
-            timestamp_str=gen_timestamp_str,
-            prev_hash=genesis_prev_hash
+            payload=gen_payload,
+            timestamp=gen_timestamp,
+            prev_hash=genesis_prev
         )
 
-        genesis_log = AuditLog(
+        log1 = AuditLog(
             action="GENESIS_BLOCK",
             performed_by="SYSTEM",
             target_resource="SYSTEM",
-            payload="PolarOps Ledger Initialized for 44th ISEA",
-            timestamp=gen_time,
-            prev_hash=genesis_prev_hash,
-            hash=genesis_hash
+            payload=AuditLog.serialize_payload(gen_payload),
+            timestamp=gen_timestamp,
+            prev_hash=genesis_prev,
+            hash=gen_hash
         )
-        db.add(genesis_log)
+        db.add(log1)
         db.commit()
-        db.refresh(genesis_log)
+        db.refresh(log1)
 
-        # Second entry
-        entry2_time = datetime.utcnow()
-        entry2_timestamp_str = entry2_time.isoformat()
-        entry2_hash = AuditLog.compute_hash(
+        # Entry 2: Expedition creation
+        exp_timestamp = datetime(2025, 11, 15, 8, 5, 0, tzinfo=timezone.utc)
+        exp_payload = {"expedition_id": expedition.id, "target_team_size": 40, "station": "Maitri"}
+        exp_hash = AuditLog.compute_hash(
             action="EXPEDITION_CREATED",
             performed_by="leader@polarops.in",
             target_resource=f"EXPEDITION-{expedition.id}",
-            payload=f"Created 44th ISEA Expedition target_team_size=40",
-            timestamp_str=entry2_timestamp_str,
-            prev_hash=genesis_log.hash
+            payload=exp_payload,
+            timestamp=exp_timestamp,
+            prev_hash=log1.hash
         )
 
         log2 = AuditLog(
             action="EXPEDITION_CREATED",
             performed_by="leader@polarops.in",
             target_resource=f"EXPEDITION-{expedition.id}",
-            payload=f"Created 44th ISEA Expedition target_team_size=40",
-            timestamp=entry2_time,
-            prev_hash=genesis_log.hash,
-            hash=entry2_hash
+            payload=AuditLog.serialize_payload(exp_payload),
+            timestamp=exp_timestamp,
+            prev_hash=log1.hash,
+            hash=exp_hash
         )
         db.add(log2)
         db.commit()
@@ -297,9 +360,11 @@ def seed_database():
         db.rollback()
         print(f"[ERROR] Error seeding database: {e}")
         raise e
-
     finally:
         db.close()
 
 if __name__ == "__main__":
-    seed_database()
+    do_reset = True
+    if len(sys.argv) > 1 and sys.argv[1] == "--no-reset":
+        do_reset = False
+    seed_database(reset=do_reset)
