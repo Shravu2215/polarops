@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Float, DateTime, Date
+from sqlalchemy import Column, Integer, String, Float, DateTime, Date, JSON
 from datetime import datetime
 from database import Base
 
@@ -14,4 +14,9 @@ class Expedition(Base):
     end_date = Column(Date, nullable=False)
     status = Column(String, default="Planning")  # Planning, Active, Completed, Suspended
     target_team_size = Column(Integer, default=25)
+    departure_deadline = Column(String, nullable=True)
+    milestones_json = Column(JSON, nullable=True)
+    schedule_output = Column(JSON, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+

@@ -176,6 +176,29 @@ class SOSRequest(BaseModel):
     longitude: float
     client_timestamp: Optional[str] = None
 
+class CreatePersonRequest(BaseModel):
+    name: str
+    role: str
+    skills: Optional[List[str]] = []
+    latitude: float
+    longitude: float
+    station_name: str
+    status: Optional[str] = "Active"
+    phone: Optional[str] = None
+    vehicle_assigned: Optional[str] = None
+
+class MilestoneInput(BaseModel):
+    name: str
+    duration_days: int
+
+class PlanScheduleRequest(BaseModel):
+    expedition_id: Optional[int] = None
+    expedition_name: Optional[str] = "Bharati 2026 Season Expedition"
+    station_name: Optional[str] = "Bharati"
+    departure_deadline: str
+    milestones: List[MilestoneInput]
+
+
 # --- Root & Health Routes ---
 @app.get("/")
 def read_root():
@@ -944,12 +967,202 @@ def get_vehicles(current_user: models.User = Depends(get_current_user), db: Sess
     return db.query(models.Vehicle).all()
 
 
-# --- People Route ---
+# --- People Routes ---
 @app.get("/people")
 def get_people(current_user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
     return db.query(models.Person).all()
 
+@app.post("/people")
+def create_person(
+    req: CreatePersonRequest,
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    person = models.Person(
+        name=req.name,
+        role=req.role,
+        skills=req.skills or [],
+        latitude=req.latitude,
+        longitude=req.longitude,
+        station_name=req.station_name,
+        status=req.status or "Active",
+        phone=req.phone,
+        vehicle_assigned=req.vehicle_assigned,
+        last_location_update=datetime.now(timezone.utc),
+        updated_at=datetime.now(timezone.utc)
+    )
+    db.add(person)
+    db.commit()
+    db.refresh(person)
+    return person
+
+# --- Planner / Backward Scheduling Engine ---
+def calculate_backward_schedule(departure_deadline_str: str, milestones: List[dict]):
+    try:
+        deadline = datetime.strptime(departure_deadline_str, "%Y-%m-%d").date()
+    except Exception:
+        deadline = datetime.fromisoformat(departure_deadline_str.replace("Z", "+00:00")).date()
+
+    today = datetime.now(timezone.utc).date()
+
+    scheduled = []
+    curr_finish = deadline
+    for m in reversed(milestones):
+        m_name = m.get("name") or "Milestone"
+        duration = int(m.get("duration_days", 1))
+        start_date = curr_finish - timedelta(days=duration)
+        is_at_risk = start_date < today
+
+        scheduled.append({
+            "name": m_name,
+            "duration_days": duration,
+            "latest_start_date": start_date.isoformat(),
+            "latest_finish_date": curr_finish.isoformat(),
+            "is_at_risk": is_at_risk
+        })
+        curr_finish = start_date
+
+    scheduled.reverse()
+
+    earliest_start = datetime.strptime(scheduled[0]["latest_start_date"], "%Y-%m-%d").date() if scheduled else today
+    total_buffer_days = (earliest_start - today).days
+    at_risk_count = sum(1 for item in scheduled if item["is_at_risk"])
+
+    return {
+        "departure_deadline": deadline.isoformat(),
+        "total_buffer_days": total_buffer_days,
+        "scheduled_milestones": scheduled,
+        "at_risk_count": at_risk_count,
+        "has_at_risk": at_risk_count > 0,
+        "calculated_at": datetime.now(timezone.utc).isoformat()
+    }
+
+@app.get("/planner")
+def get_planner_schedule(
+    expedition_id: Optional[int] = None,
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    exp = None
+    if expedition_id:
+        exp = db.query(models.Expedition).filter(models.Expedition.id == expedition_id).first()
+    else:
+        exp = db.query(models.Expedition).first()
+
+    if exp and exp.schedule_output:
+        return {
+            "expedition_id": exp.id,
+            "expedition_name": exp.name,
+            "station_name": exp.station_name,
+            "schedule": exp.schedule_output
+        }
+
+    default_deadline = (datetime.now(timezone.utc) + timedelta(days=45)).strftime("%Y-%m-%d")
+    default_milestones = [
+        {"name": "Procurement & Gear Sourcing", "duration_days": 14},
+        {"name": "Packing & Cold Cargo Prep", "duration_days": 7},
+        {"name": "Vessel / Air Shipping to Base", "duration_days": 18},
+        {"name": "Station Setup & Safety Audit", "duration_days": 5}
+    ]
+    schedule_res = calculate_backward_schedule(default_deadline, default_milestones)
+    return {
+        "expedition_id": exp.id if exp else None,
+        "expedition_name": exp.name if exp else "Bharati 2026 Season Expedition",
+        "station_name": exp.station_name if exp else "Bharati",
+        "schedule": schedule_res
+    }
+
+@app.post("/planner/schedule")
+def save_planner_schedule(
+    req: PlanScheduleRequest,
+    request: Request,
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    cached = check_idempotency(request, db)
+    if cached:
+        return cached
+
+    milestone_dicts = [m.model_dump() for m in req.milestones]
+    schedule_res = calculate_backward_schedule(req.departure_deadline, milestone_dicts)
+
+    exp = None
+    if req.expedition_id:
+        exp = db.query(models.Expedition).filter(models.Expedition.id == req.expedition_id).first()
+
+    if not exp:
+        exp = db.query(models.Expedition).first()
+
+    if not exp:
+        try:
+            deadline_date = datetime.strptime(schedule_res["departure_deadline"], "%Y-%m-%d").date()
+        except Exception:
+            deadline_date = datetime.now(timezone.utc).date() + timedelta(days=45)
+
+        exp = models.Expedition(
+            name=req.expedition_name or "Bharati 2026 Season Expedition",
+            station_name=req.station_name or "Bharati",
+            start_date=deadline_date - timedelta(days=60),
+            end_date=deadline_date,
+            status="Planning",
+            target_team_size=25
+        )
+        db.add(exp)
+        db.flush()
+
+    exp.departure_deadline = schedule_res["departure_deadline"]
+    exp.milestones_json = milestone_dicts
+    exp.schedule_output = schedule_res
+    exp.updated_at = datetime.now(timezone.utc)
+    db.commit()
+    db.refresh(exp)
+
+    prev_log = db.query(AuditLog).order_by(AuditLog.id.desc()).first()
+    prev_hash = prev_log.hash if prev_log else "0" * 64
+    ts = datetime.now(timezone.utc)
+
+    audit_payload = {
+        "event": "PLANNER_SCHEDULE_UPDATED",
+        "expedition_id": exp.id,
+        "expedition_name": exp.name,
+        "departure_deadline": schedule_res["departure_deadline"],
+        "total_buffer_days": schedule_res["total_buffer_days"],
+        "at_risk_count": schedule_res["at_risk_count"],
+        "milestones_count": len(req.milestones)
+    }
+
+    entry_hash = AuditLog.compute_hash(
+        action="PLAN_UPDATE",
+        performed_by=current_user.username,
+        target_resource=f"Expedition:{exp.id}",
+        payload=audit_payload,
+        timestamp=ts,
+        prev_hash=prev_hash
+    )
+
+    audit_log = AuditLog(
+        action="PLAN_UPDATE",
+        performed_by=current_user.username,
+        target_resource=f"Expedition:{exp.id}",
+        payload=AuditLog.serialize_payload(audit_payload),
+        timestamp=ts,
+        prev_hash=prev_hash,
+        hash=entry_hash
+    )
+    db.add(audit_log)
+    db.commit()
+
+    res_body = {
+        "expedition_id": exp.id,
+        "expedition_name": exp.name,
+        "station_name": exp.station_name,
+        "schedule": schedule_res
+    }
+    save_idempotency(request, 200, res_body, db)
+    return res_body
+
 # --- Alerts Route ---
+
 @app.get("/alerts")
 def get_alerts(current_user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
     return db.query(models.Alert).order_by(models.Alert.created_at.desc()).all()
