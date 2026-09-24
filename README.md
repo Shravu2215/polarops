@@ -9,24 +9,11 @@ PolarOps is an extreme-environment operational digital twin and emergency manage
 
 ---
 
-## System Overview & Screenshots
+## System Overview & Media
 
 Demo video: to be added
 
-### Operational Dashboard
-![Dashboard Overview](docs/screenshots/dashboard_overview.png)
-
-### OR-Tools Cargo Knapsack Optimizer
-![Cargo Load Optimizer](docs/screenshots/cargo_optimizer.png)
-
-### Personnel Roster & Vehicle Fleet Tracking
-![Team Roster & Vehicles](docs/screenshots/team_roster.png)
-
-### Expedition Planner & Backward Schedule Engine
-![Expedition Timeline Planner](docs/screenshots/expedition_planner.png)
-
-### Immutable Audit Ledger & Verification
-![Cryptographic Audit Ledger](docs/screenshots/audit_ledger.png)
+Screenshots: to be added from the running app.
 
 ---
 
