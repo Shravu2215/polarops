@@ -41,7 +41,7 @@ interface Vehicle {
 }
 
 export default function TeamScreen() {
-  const { token } = useApp();
+  const { token, user } = useApp();
   const [people, setPeople] = useState<Person[]>([]);
   const [vehicles, setVehicles] = useState<Vehicle[]>([]);
   const [loading, setLoading] = useState<boolean>(true);
@@ -202,7 +202,14 @@ export default function TeamScreen() {
                       <Text style={styles.avatarText}>{person.name.charAt(0).toUpperCase()}</Text>
                     </View>
                     <View style={styles.mainInfo}>
-                      <Text style={styles.personName}>{person.name}</Text>
+                      <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                        <Text style={styles.personName}>{person.name}</Text>
+                        {(person.name.toLowerCase() === (user?.username || '').toLowerCase() || person.name.toLowerCase() === (user?.email || '').toLowerCase()) ? (
+                          <View style={{ backgroundColor: colors.primaryIce, paddingHorizontal: 6, paddingVertical: 1, borderRadius: 8, borderWidth: 1, borderColor: colors.cardBorder }}>
+                            <Text style={{ fontFamily: typography.fontFamily.bold, fontSize: 10, color: colors.primary }}>You</Text>
+                          </View>
+                        ) : null}
+                      </View>
                       <Text style={styles.personRole}>{person.role}</Text>
                       <Text style={styles.stationLabel}>
                         <MaterialIcons name="location-on" size={13} color={colors.primary} /> {person.station_name} Station

@@ -124,7 +124,14 @@ export default function VehiclesScreen() {
             <MaterialIcons name="add" size={18} color={colors.white} />
             <Text style={styles.addBtnText}>Add Vehicle</Text>
           </TouchableOpacity>
-        ) : null}
+        ) : (
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4, backgroundColor: colors.primaryIce, paddingHorizontal: 10, paddingVertical: 4, borderRadius: radius.button, borderWidth: 1, borderColor: colors.cardBorder }}>
+            <MaterialIcons name="visibility" size={14} color={colors.primary} />
+            <Text style={{ fontFamily: typography.fontFamily.bold, fontSize: 11, color: colors.primary }}>
+              View Only
+            </Text>
+          </View>
+        )}
       </View>
 
       {loading ? (

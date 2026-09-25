@@ -49,7 +49,8 @@ interface AuditEntry {
 
 export default function PlannerScreen() {
   const router = useRouter();
-  const { token } = useApp();
+  const { token, user } = useApp();
+  const isTeamMember = user?.role === 'Team Member';
 
   const [expeditionName, setExpeditionName] = useState<string>('Bharati 45th Expedition');
   const [stationName, setStationName] = useState<string>('Bharati');
@@ -267,36 +268,43 @@ export default function PlannerScreen() {
             ))}
 
             {/* Add Custom Milestone Form */}
-            <View style={styles.addMilestoneForm}>
-              <TextInput
-                style={[styles.input, { flex: 2, marginBottom: 0 }]}
-                placeholder="New Milestone Name"
-                value={newMName}
-                onChangeText={setNewMName}
-              />
-              <TextInput
-                style={[styles.input, { width: 50, marginBottom: 0, textAlign: 'center' }]}
-                keyboardType="numeric"
-                placeholder="Days"
-                value={newMDuration}
-                onChangeText={setNewMDuration}
-              />
-              <TouchableOpacity onPress={addMilestone} style={styles.addBtn}>
-                <MaterialIcons name="add" size={20} color="#FFF" />
-              </TouchableOpacity>
-            </View>
+            {!isTeamMember ? (
+              <View style={styles.addMilestoneForm}>
+                <TextInput
+                  style={[styles.input, { flex: 2, marginBottom: 0 }]}
+                  placeholder="New Milestone Name"
+                  value={newMName}
+                  onChangeText={setNewMName}
+                />
+                <TextInput
+                  style={[styles.input, { width: 50, marginBottom: 0, textAlign: 'center' }]}
+                  keyboardType="numeric"
+                  placeholder="Days"
+                  value={newMDuration}
+                  onChangeText={setNewMDuration}
+                />
+                <TouchableOpacity onPress={addMilestone} style={styles.addBtn}>
+                  <MaterialIcons name="add" size={20} color="#FFF" />
+                </TouchableOpacity>
+              </View>
+            ) : null}
 
             <TouchableOpacity
               onPress={handleComputeAndSave}
-              disabled={saving}
-              style={[styles.computeBtn, saving && { opacity: 0.6 }]}
+              disabled={saving || isTeamMember}
+              style={[
+                styles.computeBtn,
+                (saving || isTeamMember) && { opacity: 0.6, backgroundColor: isTeamMember ? colors.secondaryText : colors.primary },
+              ]}
             >
               {saving ? (
                 <ActivityIndicator color="#FFF" size="small" />
               ) : (
                 <>
-                  <MaterialIcons name="event-available" size={20} color="#FFF" />
-                  <Text style={styles.computeBtnText}>Compute & Save Schedule</Text>
+                  <MaterialIcons name={isTeamMember ? "lock" : "event-available"} size={20} color="#FFF" />
+                  <Text style={styles.computeBtnText}>
+                    {isTeamMember ? 'View-Only Schedule (Leader Required)' : 'Compute & Save Schedule'}
+                  </Text>
                 </>
               )}
             </TouchableOpacity>
