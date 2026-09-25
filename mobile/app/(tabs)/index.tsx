@@ -59,7 +59,8 @@ const STORAGE_KEY = '@polarops_dashboard_summary';
 
 export default function HomeScreen() {
   const router = useRouter();
-  const { token } = useApp();
+  const { token, user } = useApp();
+  const isTeamMember = user?.role === 'Team Member';
   const [data, setData] = useState<DashboardSummary | null>(null);
   const [loading, setLoading] = useState<boolean>(true);
   const [refreshing, setRefreshing] = useState<boolean>(false);
@@ -170,6 +171,44 @@ export default function HomeScreen() {
           </View>
         ) : null}
 
+        {/* Personal Check-In & Role Banner for Team Member */}
+        {isTeamMember ? (
+          <View style={{
+            backgroundColor: colors.card,
+            borderRadius: radius.card,
+            borderWidth: 1,
+            borderColor: colors.cardBorder,
+            padding: spacing.md,
+            flexDirection: 'row',
+            alignItems: 'center',
+            gap: spacing.md,
+          }}>
+            <View style={{
+              width: 44,
+              height: 44,
+              borderRadius: 22,
+              backgroundColor: colors.primaryIce,
+              alignItems: 'center',
+              justifyContent: 'center',
+            }}>
+              <MaterialIcons name="my-location" size={24} color={colors.primary} />
+            </View>
+            <View style={{ flex: 1 }}>
+              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                <Text style={{ fontFamily: typography.fontFamily.bold, fontSize: 14, color: colors.text }}>
+                  {user?.username || 'Team Member'}
+                </Text>
+                <View style={{ backgroundColor: colors.okGreen + '20', paddingHorizontal: 6, paddingVertical: 1, borderRadius: 8 }}>
+                  <Text style={{ fontFamily: typography.fontFamily.bold, fontSize: 10, color: colors.okGreen }}>Check-In Active</Text>
+                </View>
+              </View>
+              <Text style={{ fontFamily: typography.fontFamily.regular, fontSize: 12, color: colors.secondaryText, marginTop: 2 }}>
+                Station: {user?.station_name || 'Maitri'} • GPS Location Reporting Active
+              </Text>
+            </View>
+          </View>
+        ) : null}
+
         {/* Hero Card: Survival Days Left */}
         {data?.survival_days !== null && data?.survival_days !== undefined ? (
           <View style={styles.heroCard}>
@@ -221,16 +260,37 @@ export default function HomeScreen() {
         ) : (
           <View style={styles.emptyCard}>
             <MaterialIcons name="event-busy" size={36} color={colors.secondaryText} />
-            <Text style={styles.emptyTitle}>No Active Expedition</Text>
-            <Text style={styles.emptySub}>
-              Create an expedition to compute survival days & live station metrics.
+            <Text style={styles.emptyTitle}>
+              {isTeamMember ? 'No Active Expedition Configured' : 'No Active Expedition'}
             </Text>
-            <TouchableOpacity
-              style={styles.emptyActionButton}
-              onPress={() => router.push('/more')}
-            >
-              <Text style={styles.emptyActionText}>Create Expedition</Text>
-            </TouchableOpacity>
+            <Text style={styles.emptySub}>
+              {isTeamMember
+                ? 'Expedition planning is managed by station leadership. You can view station stock & team status below.'
+                : 'Create an expedition to compute survival days & live station metrics.'}
+            </Text>
+            {isTeamMember ? (
+              <View style={{ flexDirection: 'row', gap: spacing.sm, marginTop: spacing.xs }}>
+                <TouchableOpacity
+                  style={styles.emptyActionButton}
+                  onPress={() => router.push('/inventory')}
+                >
+                  <Text style={styles.emptyActionText}>View Inventory</Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={[styles.emptyActionButton, { backgroundColor: colors.chipBackground }]}
+                  onPress={() => router.push('/team')}
+                >
+                  <Text style={[styles.emptyActionText, { color: colors.text }]}>View Team</Text>
+                </TouchableOpacity>
+              </View>
+            ) : (
+              <TouchableOpacity
+                style={styles.emptyActionButton}
+                onPress={() => router.push('/more')}
+              >
+                <Text style={styles.emptyActionText}>Create Expedition</Text>
+              </TouchableOpacity>
+            )}
           </View>
         )}
 

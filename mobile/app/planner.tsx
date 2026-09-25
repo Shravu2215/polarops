@@ -203,35 +203,57 @@ export default function PlannerScreen() {
         </View>
       ) : (
         <ScrollView contentContainerStyle={styles.content}>
+          {isTeamMember ? (
+            <View style={{
+              flexDirection: 'row',
+              alignItems: 'center',
+              backgroundColor: colors.primaryIce,
+              borderColor: colors.cardBorder,
+              borderWidth: 1,
+              borderRadius: radius.card,
+              padding: spacing.sm + 2,
+              gap: spacing.xs,
+              marginBottom: spacing.xs,
+            }}>
+              <MaterialIcons name="visibility" size={16} color={colors.primary} />
+              <Text style={{ fontFamily: typography.fontFamily.medium, fontSize: 12, color: colors.primary, flex: 1 }}>
+                View-Only Mode • Schedule calculations & milestone edits are reserved for Expedition Leaders.
+              </Text>
+            </View>
+          ) : null}
+
           {/* Plan Configuration Box */}
           <View style={styles.card}>
             <Text style={styles.cardTitle}>Departure Deadline & Milestones</Text>
 
             <Text style={styles.inputLabel}>Expedition Name</Text>
             <TextInput
-              style={styles.input}
+              style={[styles.input, isTeamMember && { backgroundColor: colors.cardBorder + '30', color: colors.secondaryText }]}
               value={expeditionName}
               onChangeText={setExpeditionName}
               placeholder="Expedition Name"
+              editable={!isTeamMember}
             />
 
             <View style={styles.row}>
               <View style={{ flex: 1, marginRight: spacing.xs }}>
                 <Text style={styles.inputLabel}>Station Name</Text>
                 <TextInput
-                  style={styles.input}
+                  style={[styles.input, isTeamMember && { backgroundColor: colors.cardBorder + '30', color: colors.secondaryText }]}
                   value={stationName}
                   onChangeText={setStationName}
                   placeholder="Station Name"
+                  editable={!isTeamMember}
                 />
               </View>
               <View style={{ flex: 1, marginLeft: spacing.xs }}>
                 <Text style={styles.inputLabel}>Deadline (YYYY-MM-DD)</Text>
                 <TextInput
-                  style={styles.input}
+                  style={[styles.input, isTeamMember && { backgroundColor: colors.cardBorder + '30', color: colors.secondaryText }]}
                   value={departureDeadline}
                   onChangeText={setDepartureDeadline}
                   placeholder="2026-11-15"
+                  editable={!isTeamMember}
                 />
               </View>
             </View>
@@ -242,8 +264,9 @@ export default function PlannerScreen() {
               <View key={idx} style={styles.milestoneRow}>
                 <Text style={styles.milestoneIndex}>{idx + 1}.</Text>
                 <TextInput
-                  style={[styles.input, { flex: 2, marginBottom: 0 }]}
+                  style={[styles.input, { flex: 2, marginBottom: 0 }, isTeamMember && { backgroundColor: colors.cardBorder + '30', color: colors.secondaryText }]}
                   value={m.name}
+                  editable={!isTeamMember}
                   onChangeText={txt => {
                     const updated = [...milestones];
                     updated[idx].name = txt;
@@ -251,9 +274,10 @@ export default function PlannerScreen() {
                   }}
                 />
                 <TextInput
-                  style={[styles.input, { width: 50, marginBottom: 0, textAlign: 'center' }]}
+                  style={[styles.input, { width: 50, marginBottom: 0, textAlign: 'center' }, isTeamMember && { backgroundColor: colors.cardBorder + '30', color: colors.secondaryText }]}
                   keyboardType="numeric"
                   value={String(m.duration_days)}
+                  editable={!isTeamMember}
                   onChangeText={txt => {
                     const updated = [...milestones];
                     updated[idx].duration_days = Number(txt) || 1;
@@ -261,9 +285,11 @@ export default function PlannerScreen() {
                   }}
                 />
                 <Text style={styles.daysText}>days</Text>
-                <TouchableOpacity onPress={() => removeMilestone(idx)} style={styles.deleteBtn}>
-                  <MaterialIcons name="close" size={18} color={colors.danger} />
-                </TouchableOpacity>
+                {!isTeamMember ? (
+                  <TouchableOpacity onPress={() => removeMilestone(idx)} style={styles.deleteBtn}>
+                    <MaterialIcons name="close" size={18} color={colors.danger} />
+                  </TouchableOpacity>
+                ) : null}
               </View>
             ))}
 
