@@ -25,6 +25,9 @@ export default function MoreScreen() {
   const { user, token, logout } = useApp();
   const { pendingCount, addToQueue } = useSyncQueue();
 
+  const isTeamMember = user?.role === 'Team Member';
+  const isLeader = user?.role === 'Expedition Leader';
+
   // Modals state
   const [showExpeditionModal, setShowExpeditionModal] = useState<boolean>(false);
   const [showInventoryModal, setShowInventoryModal] = useState<boolean>(false);
@@ -174,23 +177,27 @@ export default function MoreScreen() {
         {/* Action Buttons for Data Entry */}
         <Text style={styles.sectionHeader}>Station Entry & Resource Forms</Text>
         <View style={styles.formButtonGrid}>
-          <TouchableOpacity
-            style={styles.formButton}
-            onPress={() => setShowExpeditionModal(true)}
-          >
-            <MaterialIcons name="flag" size={24} color={colors.primary} />
-            <Text style={styles.formButtonTitle}>Create Expedition</Text>
-            <Text style={styles.formButtonSub}>Station name & team size</Text>
-          </TouchableOpacity>
+          {isLeader && (
+            <TouchableOpacity
+              style={styles.formButton}
+              onPress={() => setShowExpeditionModal(true)}
+            >
+              <MaterialIcons name="flag" size={24} color={colors.primary} />
+              <Text style={styles.formButtonTitle}>Create Expedition</Text>
+              <Text style={styles.formButtonSub}>Station name & team size</Text>
+            </TouchableOpacity>
+          )}
 
-          <TouchableOpacity
-            style={styles.formButton}
-            onPress={() => setShowInventoryModal(true)}
-          >
-            <MaterialIcons name="inventory" size={24} color={colors.accentOrange} />
-            <Text style={styles.formButtonTitle}>Add Station Stock</Text>
-            <Text style={styles.formButtonSub}>Fuel, Rations, Spares</Text>
-          </TouchableOpacity>
+          {!isTeamMember && (
+            <TouchableOpacity
+              style={styles.formButton}
+              onPress={() => setShowInventoryModal(true)}
+            >
+              <MaterialIcons name="inventory" size={24} color={colors.accentOrange} />
+              <Text style={styles.formButtonTitle}>Add Station Stock</Text>
+              <Text style={styles.formButtonSub}>Fuel, Rations, Spares</Text>
+            </TouchableOpacity>
+          )}
 
           <TouchableOpacity
             style={styles.formButton}
@@ -198,7 +205,9 @@ export default function MoreScreen() {
           >
             <MaterialIcons name="directions-car" size={24} color={colors.primary} />
             <Text style={styles.formButtonTitle}>Vehicles & Fleet</Text>
-            <Text style={styles.formButtonSub}>Manage Sno-Cats, copters & limits</Text>
+            <Text style={styles.formButtonSub}>
+              {isTeamMember ? 'View Sno-Cats & copters' : 'Manage Sno-Cats, copters & limits'}
+            </Text>
           </TouchableOpacity>
 
           <TouchableOpacity
@@ -207,17 +216,21 @@ export default function MoreScreen() {
           >
             <MaterialIcons name="local-shipping" size={24} color={colors.accentOrange} />
             <Text style={styles.formButtonTitle}>Cargo Manifest</Text>
-            <Text style={styles.formButtonSub}>Track weight, volume & priority</Text>
+            <Text style={styles.formButtonSub}>
+              {isTeamMember ? 'View weight, volume & priority' : 'Track weight, volume & priority'}
+            </Text>
           </TouchableOpacity>
 
-          <TouchableOpacity
-            style={styles.formButton}
-            onPress={() => router.push('/users')}
-          >
-            <MaterialIcons name="people" size={24} color={colors.okGreen} />
-            <Text style={styles.formButtonTitle}>Personnel & Roles</Text>
-            <Text style={styles.formButtonSub}>View team, skills & role management</Text>
-          </TouchableOpacity>
+          {!isTeamMember && (
+            <TouchableOpacity
+              style={styles.formButton}
+              onPress={() => router.push('/users')}
+            >
+              <MaterialIcons name="people" size={24} color={colors.okGreen} />
+              <Text style={styles.formButtonTitle}>Personnel & Roles</Text>
+              <Text style={styles.formButtonSub}>View team, skills & role management</Text>
+            </TouchableOpacity>
+          )}
         </View>
 
         {/* Module Shortcuts */}

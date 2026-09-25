@@ -151,6 +151,26 @@ export default function UsersScreen() {
   };
 
   const isLeader = user?.role === 'Expedition Leader';
+  const isTeamMember = user?.role === 'Team Member';
+
+  if (isTeamMember) {
+    return (
+      <SafeAreaView style={styles.container} edges={['top']}>
+        <Header title="Personnel & Roles" />
+        <View style={styles.restrictedBox}>
+          <MaterialIcons name="lock" size={40} color={colors.secondaryText} />
+          <Text style={styles.restrictedTitle}>Restricted</Text>
+          <Text style={styles.restrictedText}>
+            Personnel & role management is only available to the Expedition Leader, Logistics Officer and Base Admin.
+          </Text>
+          <TouchableOpacity style={styles.backBtn} onPress={() => router.back()}>
+            <MaterialIcons name="arrow-back" size={20} color={colors.text} />
+            <Text style={styles.backText}>Back</Text>
+          </TouchableOpacity>
+        </View>
+      </SafeAreaView>
+    );
+  }
 
   return (
     <SafeAreaView style={styles.container} edges={['top']}>
@@ -327,6 +347,26 @@ const styles = StyleSheet.create({
     paddingVertical: spacing.sm,
   },
   backBtn: { flexDirection: 'row', alignItems: 'center', gap: 4 },
+  restrictedBox: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: spacing.xl,
+    gap: spacing.sm,
+  },
+  restrictedTitle: {
+    fontFamily: typography.fontFamily.bold,
+    fontSize: typography.fontSize.lg,
+    color: colors.text,
+    marginTop: spacing.sm,
+  },
+  restrictedText: {
+    fontFamily: typography.fontFamily.regular,
+    fontSize: typography.fontSize.sm,
+    color: colors.secondaryText,
+    textAlign: 'center',
+    marginBottom: spacing.md,
+  },
   backText: { fontFamily: typography.fontFamily.medium, fontSize: typography.fontSize.sm, color: colors.text },
   addBtn: {
     backgroundColor: colors.primary,
