@@ -52,16 +52,10 @@ export default function PlannerScreen() {
   const { token, user } = useApp();
   const isTeamMember = user?.role === 'Team Member';
 
-  const [expeditionName, setExpeditionName] = useState<string>('Bharati 45th Expedition');
-  const [stationName, setStationName] = useState<string>('Bharati');
-  const [departureDeadline, setDepartureDeadline] = useState<string>('2026-11-15');
-
-  const [milestones, setMilestones] = useState<MilestoneItem[]>([
-    { name: 'Procurement & Gear Sourcing', duration_days: 14 },
-    { name: 'Packing & Cold Cargo Prep', duration_days: 7 },
-    { name: 'Vessel / Air Shipping to Base', duration_days: 18 },
-    { name: 'Station Setup & Safety Audit', duration_days: 5 },
-  ]);
+  const [expeditionName, setExpeditionName] = useState<string>('');
+  const [stationName, setStationName] = useState<string>('');
+  const [departureDeadline, setDepartureDeadline] = useState<string>('');
+  const [milestones, setMilestones] = useState<MilestoneItem[]>([]);
 
   const [schedule, setSchedule] = useState<ScheduleData | null>(null);
   const [auditLogs, setAuditLogs] = useState<AuditEntry[]>([]);

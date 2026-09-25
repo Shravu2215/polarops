@@ -557,6 +557,8 @@ def create_expedition(
     exp = models.Expedition(
         name=req.name,
         station_name=req.station_name,
+        latitude=req.latitude,
+        longitude=req.longitude,
         start_date=start_d,
         end_date=end_d,
         status=req.status or "Active",
@@ -1057,19 +1059,11 @@ def get_planner_schedule(
             "schedule": exp.schedule_output
         }
 
-    default_deadline = (datetime.now(timezone.utc) + timedelta(days=45)).strftime("%Y-%m-%d")
-    default_milestones = [
-        {"name": "Procurement & Gear Sourcing", "duration_days": 14},
-        {"name": "Packing & Cold Cargo Prep", "duration_days": 7},
-        {"name": "Vessel / Air Shipping to Base", "duration_days": 18},
-        {"name": "Station Setup & Safety Audit", "duration_days": 5}
-    ]
-    schedule_res = calculate_backward_schedule(default_deadline, default_milestones)
     return {
         "expedition_id": exp.id if exp else None,
-        "expedition_name": exp.name if exp else "Bharati 2026 Season Expedition",
-        "station_name": exp.station_name if exp else "Bharati",
-        "schedule": schedule_res
+        "expedition_name": exp.name if exp else None,
+        "station_name": exp.station_name if exp else None,
+        "schedule": None
     }
 
 @app.post("/planner/schedule")
@@ -1301,26 +1295,32 @@ async def get_dashboard_summary(current_user: models.User = Depends(get_current_
     
     survival_days = None
     weather_data = None
-    exp_temp = -30.0  # Default Antarctic temperature fallback
+    exp_temp = None
+    is_weather_estimated = False
     
     if active_exp:
         station_name = active_exp.station_name
         team_size = active_exp.target_team_size or 6
 
-        exp_lat = getattr(active_exp, 'latitude', None) or (-70.7660 if station_name == "Maitri" else -69.4070)
-        exp_lon = getattr(active_exp, 'longitude', None) or (11.7330 if station_name == "Maitri" else 76.1910)
+        exp_lat = getattr(active_exp, 'latitude', None)
+        exp_lon = getattr(active_exp, 'longitude', None)
 
-        # 1. Fetch Real Live Weather from Open-Meteo
-        weather_data = await fetch_real_weather(
-            latitude=exp_lat,
-            longitude=exp_lon,
-            station_name=station_name
-        )
+        # 1. Fetch Real Live Weather from Open-Meteo using real stored coordinates
+        if exp_lat is not None and exp_lon is not None:
+            weather_data = await fetch_real_weather(
+                latitude=exp_lat,
+                longitude=exp_lon,
+                station_name=station_name
+            )
 
-        if weather_data and "temperature" in weather_data:
+        if weather_data and "temperature" in weather_data and weather_data["temperature"] is not None:
             exp_temp = weather_data["temperature"]
+            is_weather_estimated = False
+        else:
+            exp_temp = -30.0  # Fallback temperature for survival calculation
+            is_weather_estimated = True
 
-        # 2. Survival Days computed at REAL station weather temperature using cold_factor
+        # 2. Survival Days computed at station weather temperature using cold_factor
         station_items = db.query(models.InventoryItem).filter(
             models.InventoryItem.location_station == station_name,
             models.InventoryItem.category.in_(["Fuel", "Ration"])
@@ -1366,7 +1366,8 @@ async def get_dashboard_summary(current_user: models.User = Depends(get_current_
 
     return {
         "survival_days": survival_days,
-        "temperature_used": exp_temp,
+        "temperature_used": exp_temp if not is_weather_estimated else None,
+        "is_weather_estimated": is_weather_estimated,
         "active_expeditions": active_expeditions_count,
         "cargo_in_transit": cargo_in_transit_count,
         "personnel_on_field": personnel_on_field_count,

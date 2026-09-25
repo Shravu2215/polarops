@@ -35,17 +35,19 @@ export default function MoreScreen() {
   const [submitting, setSubmitting] = useState<boolean>(false);
 
   // Expedition Form
-  const [expName, setExpName] = useState<string>('44th Indian Expedition to Maitri');
-  const [stationName, setStationName] = useState<string>('Maitri');
-  const [teamSize, setTeamSize] = useState<string>('25');
+  const [expName, setExpName] = useState<string>('');
+  const [stationName, setStationName] = useState<string>('');
+  const [teamSize, setTeamSize] = useState<string>('');
+  const [expLat, setExpLat] = useState<string>('-70.7660');
+  const [expLon, setExpLon] = useState<string>('11.7330');
 
   // Inventory Form
-  const [itemName, setItemName] = useState<string>('Polar Diesel Fuel Drums');
+  const [itemName, setItemName] = useState<string>('');
   const [category, setCategory] = useState<string>('Fuel');
-  const [quantity, setQuantity] = useState<string>('15000');
+  const [quantity, setQuantity] = useState<string>('');
   const [unit, setUnit] = useState<string>('Litres');
-  const [minReq, setMinReq] = useState<string>('4000');
-  const [dailyUse, setDailyUse] = useState<string>('15');
+  const [minReq, setMinReq] = useState<string>('');
+  const [dailyUse, setDailyUse] = useState<string>('');
 
   // User Provisioning Form (Leader only)
   const [newUsername, setNewUsername] = useState<string>('');
@@ -62,6 +64,11 @@ export default function MoreScreen() {
   };
 
   const handleCreateExpedition = async () => {
+    if (!expName.trim() || !stationName.trim() || !teamSize.trim()) {
+      Alert.alert('Validation Error', 'Expedition name, station, and team size are required.');
+      return;
+    }
+
     setSubmitting(true);
     try {
       const res = await fetch(`${BACKEND_URL}/expeditions`, {
@@ -71,10 +78,10 @@ export default function MoreScreen() {
           Authorization: `Bearer ${token}`,
         },
         body: JSON.stringify({
-          name: expName,
-          station_name: stationName,
-          latitude: stationName === 'Maitri' ? -70.766 : -69.407,
-          longitude: stationName === 'Maitri' ? 11.733 : 76.191,
+          name: expName.trim(),
+          station_name: stationName.trim(),
+          latitude: parseFloat(expLat) || -70.766,
+          longitude: parseFloat(expLon) || 11.733,
           start_date: '2025-11-15',
           end_date: '2026-04-10',
           target_team_size: parseInt(teamSize, 10) || 20,
@@ -86,6 +93,9 @@ export default function MoreScreen() {
 
       Alert.alert('Success', 'Expedition created successfully!');
       setShowExpeditionModal(false);
+      setExpName('');
+      setStationName('');
+      setTeamSize('');
     } catch (err: any) {
       Alert.alert('Error', err.message || 'Failed to create expedition.');
     } finally {
@@ -296,14 +306,40 @@ export default function MoreScreen() {
                 style={styles.input}
                 value={expName}
                 onChangeText={setExpName}
+                placeholder="e.g. 45th Indian Antarctic Expedition"
               />
 
-              <Text style={styles.fieldLabel}>Station Name (Maitri or Bharati)</Text>
+              <Text style={styles.fieldLabel}>Station Name</Text>
               <TextInput
                 style={styles.input}
                 value={stationName}
                 onChangeText={setStationName}
+                placeholder="e.g. Maitri or Bharati"
               />
+
+              <View style={{ flexDirection: 'row', gap: 8 }}>
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.fieldLabel}>Latitude</Text>
+                  <TextInput
+                    style={styles.input}
+                    value={expLat}
+                    onChangeText={setExpLat}
+                    keyboardType="numeric"
+                    placeholder="-70.7660"
+                  />
+                </View>
+
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.fieldLabel}>Longitude</Text>
+                  <TextInput
+                    style={styles.input}
+                    value={expLon}
+                    onChangeText={setExpLon}
+                    keyboardType="numeric"
+                    placeholder="11.7330"
+                  />
+                </View>
+              </View>
 
               <Text style={styles.fieldLabel}>Target Team Size</Text>
               <TextInput
@@ -311,6 +347,7 @@ export default function MoreScreen() {
                 value={teamSize}
                 onChangeText={setTeamSize}
                 keyboardType="numeric"
+                placeholder="e.g. 25"
               />
 
               <TouchableOpacity

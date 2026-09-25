@@ -7,6 +7,11 @@ from models.audit import AuditLog
 from auth_utils import hash_password
 
 def seed_database(reset: bool = True):
+    env_name = os.getenv("ENV", os.getenv("ENVIRONMENT", "development")).lower()
+    if env_name in ["production", "prod"]:
+        print("[ERROR] Database seeding is strictly blocked in production environment!")
+        sys.exit(1)
+
     if reset:
         Base.metadata.drop_all(bind=engine)
         Base.metadata.create_all(bind=engine)
