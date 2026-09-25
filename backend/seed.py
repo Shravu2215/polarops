@@ -23,7 +23,7 @@ def seed_database(reset: bool = True):
         admin_email = os.getenv("ADMIN_EMAIL", "leader@polarops.in")
         admin_password = os.getenv("ADMIN_PASSWORD", "password123")
 
-        # Create ONLY Bootstrap Expedition Leader Account
+        # Create Bootstrap Expedition Leader Account
         leader_user = models.User(
             username="leader",
             email=admin_email,
@@ -32,6 +32,27 @@ def seed_database(reset: bool = True):
             station_name="Maitri"
         )
         db.add(leader_user)
+
+        # Create demo Officer account
+        officer_user = models.User(
+            username="officer",
+            email="officer@polarops.in",
+            hashed_password=hash_password("password123"),
+            role="Officer",
+            station_name="Maitri"
+        )
+        db.add(officer_user)
+
+        # Create demo Team Member account
+        member_user = models.User(
+            username="member",
+            email="member@polarops.in",
+            hashed_password=hash_password("password123"),
+            role="Team Member",
+            station_name="Maitri"
+        )
+        db.add(member_user)
+
         db.commit()
         db.refresh(leader_user)
 
@@ -144,7 +165,7 @@ def seed_database(reset: bool = True):
         db.add(genesis_log)
         db.commit()
 
-        print(f"[SUCCESS] Database reset complete! Bootstrap Leader ({admin_email}), personnel, vehicles & expedition seeded.")
+        print(f"[SUCCESS] Database reset complete! Bootstrap accounts seeded: Leader ({admin_email}), Officer (officer@polarops.in), Member (member@polarops.in). Personnel, vehicles & expedition also seeded.")
 
     except Exception as e:
         db.rollback()
