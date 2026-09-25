@@ -224,6 +224,40 @@ export default function LoginScreen() {
                     </>
                   )}
                 </TouchableOpacity>
+
+                {/* Quick Demo Login Preset */}
+                <View style={{ marginTop: spacing.md, paddingTop: spacing.sm, borderTopWidth: 1, borderTopColor: colors.cardBorder }}>
+                  <Text style={{ fontFamily: typography.fontFamily.medium, fontSize: 11, color: colors.secondaryText, marginBottom: spacing.xs }}>
+                    ⚡ DEMO QUICK FILL ACCOUNTS:
+                  </Text>
+                  <TouchableOpacity
+                    style={{
+                      flexDirection: 'row',
+                      alignItems: 'center',
+                      justifyContent: 'space-between',
+                      backgroundColor: colors.primaryIce,
+                      borderColor: colors.cardBorder,
+                      borderWidth: 1,
+                      borderRadius: radius.button,
+                      paddingHorizontal: spacing.sm,
+                      paddingVertical: spacing.xs,
+                    }}
+                    onPress={() => {
+                      setLoginEmail('leader@polarops.in');
+                      setLoginPassword('password123');
+                    }}
+                  >
+                    <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                      <MaterialIcons name="stars" size={16} color={colors.primary} />
+                      <Text style={{ fontFamily: typography.fontFamily.bold, fontSize: 12, color: colors.primary }}>
+                        Expedition Leader
+                      </Text>
+                    </View>
+                    <Text style={{ fontFamily: typography.fontFamily.medium, fontSize: 10, color: colors.secondaryText }}>
+                      leader@polarops.in
+                    </Text>
+                  </TouchableOpacity>
+                </View>
               </View>
             ) : (
               /* --- SIGN UP FORM --- */
