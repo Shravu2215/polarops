@@ -975,7 +975,7 @@ def get_people(current_user: models.User = Depends(get_current_user), db: Sessio
 @app.post("/people")
 def create_person(
     req: CreatePersonRequest,
-    current_user: models.User = Depends(get_current_user),
+    current_user: models.User = Depends(require_write_role),
     db: Session = Depends(get_db)
 ):
     person = models.Person(
@@ -1076,7 +1076,7 @@ def get_planner_schedule(
 def save_planner_schedule(
     req: PlanScheduleRequest,
     request: Request,
-    current_user: models.User = Depends(get_current_user),
+    current_user: models.User = Depends(require_write_role),
     db: Session = Depends(get_db)
 ):
     cached = check_idempotency(request, db)
