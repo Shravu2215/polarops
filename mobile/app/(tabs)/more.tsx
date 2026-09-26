@@ -19,6 +19,7 @@ import { useApp } from '../../context/AppContext';
 import { useSyncQueue } from '../../context/SyncContext';
 import { colors, spacing, radius, typography, layout } from '../../theme';
 import { BACKEND_URL } from '../../config';
+import { STANDARD_SUPPLY_CATALOG } from '../../constants/supplyCatalog';
 
 export default function MoreScreen() {
   const router = useRouter();
@@ -28,6 +29,12 @@ export default function MoreScreen() {
   const isTeamMember = user?.role === 'Team Member';
   const isLeader = user?.role === 'Expedition Leader';
 
+  // Station List & Predefined Coordinates
+  const STATION_OPTIONS: Record<string, { lat: number; lon: number }> = {
+    'Maitri': { lat: -70.7660, lon: 11.7330 },
+    'Bharati': { lat: -69.4070, lon: 76.1910 },
+  };
+
   // Modals state
   const [showExpeditionModal, setShowExpeditionModal] = useState<boolean>(false);
   const [showInventoryModal, setShowInventoryModal] = useState<boolean>(false);
@@ -36,10 +43,39 @@ export default function MoreScreen() {
 
   // Expedition Form
   const [expName, setExpName] = useState<string>('');
-  const [stationName, setStationName] = useState<string>('');
-  const [teamSize, setTeamSize] = useState<string>('');
-  const [expLat, setExpLat] = useState<string>('-70.7660');
-  const [expLon, setExpLon] = useState<string>('11.7330');
+  const [selectedStation, setSelectedStation] = useState<string>('Maitri');
+  const [startDate, setStartDate] = useState<string>('2026-11-01');
+  const [endDate, setEndDate] = useState<string>('2027-03-31');
+  const [selectedMemberIds, setSelectedMemberIds] = useState<number[]>([]);
+  const [availableUsers, setAvailableUsers] = useState<Array<{ id: number; username: string; role: string }>>([]);
+
+  // Fetch users for member selection when modal opens
+  const fetchAvailableUsers = async () => {
+    try {
+      const res = await fetch(`${BACKEND_URL}/users`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (res.ok) {
+        const usersData = await res.json();
+        setAvailableUsers(usersData);
+      }
+    } catch (e) {
+      console.warn('Failed to fetch users for expedition form:', e);
+    }
+  };
+
+  const handleOpenExpeditionModal = () => {
+    fetchAvailableUsers();
+    setShowExpeditionModal(true);
+  };
+
+  const toggleMemberSelection = (userId: number) => {
+    if (selectedMemberIds.includes(userId)) {
+      setSelectedMemberIds(selectedMemberIds.filter(id => id !== userId));
+    } else {
+      setSelectedMemberIds([...selectedMemberIds, userId]);
+    }
+  };
 
   // Inventory Form
   const [itemName, setItemName] = useState<string>('');
@@ -48,6 +84,7 @@ export default function MoreScreen() {
   const [unit, setUnit] = useState<string>('Litres');
   const [minReq, setMinReq] = useState<string>('');
   const [dailyUse, setDailyUse] = useState<string>('');
+  const [stationName, setStationName] = useState<string>('Maitri');
 
   // User Provisioning Form (Leader only)
   const [newUsername, setNewUsername] = useState<string>('');
@@ -64,10 +101,20 @@ export default function MoreScreen() {
   };
 
   const handleCreateExpedition = async () => {
-    if (!expName.trim() || !stationName.trim() || !teamSize.trim()) {
-      Alert.alert('Validation Error', 'Expedition name, station, and team size are required.');
+    if (!expName.trim()) {
+      Alert.alert('Validation Error', 'Expedition name is required.');
       return;
     }
+    if (!selectedStation) {
+      Alert.alert('Validation Error', 'Please select a station.');
+      return;
+    }
+    if (!startDate.match(/^\d{4}-\d{2}-\d{2}$/) || !endDate.match(/^\d{4}-\d{2}-\d{2}$/)) {
+      Alert.alert('Validation Error', 'Start and End dates must be in YYYY-MM-DD format.');
+      return;
+    }
+
+    const stationCoords = STATION_OPTIONS[selectedStation] || STATION_OPTIONS['Maitri'];
 
     setSubmitting(true);
     try {
@@ -79,23 +126,31 @@ export default function MoreScreen() {
         },
         body: JSON.stringify({
           name: expName.trim(),
-          station_name: stationName.trim(),
-          latitude: parseFloat(expLat) || -70.766,
-          longitude: parseFloat(expLon) || 11.733,
-          start_date: '2025-11-15',
-          end_date: '2026-04-10',
-          target_team_size: parseInt(teamSize, 10) || 20,
+          station_name: selectedStation,
+          latitude: stationCoords.lat,
+          longitude: stationCoords.lon,
+          start_date: startDate,
+          end_date: endDate,
+          target_team_size: selectedMemberIds.length,
+          assigned_members: selectedMemberIds,
           status: 'Active',
         }),
       });
 
-      if (!res.ok) throw new Error(`HTTP status ${res.status}`);
+      if (!res.ok) {
+        const errorData = await res.json().catch(() => ({}));
+        throw new Error(errorData.detail || `HTTP status ${res.status}`);
+      }
 
-      Alert.alert('Success', 'Expedition created successfully!');
+      const createdExp = await res.json();
+
+      Alert.alert(
+        'Expedition Created',
+        `Expedition ID: #${createdExp.id}\nName: ${createdExp.name}\nStation: ${createdExp.station_name}\nCoordinates: ${createdExp.latitude}°, ${createdExp.longitude}°\nTeam Size: ${createdExp.target_team_size} members`
+      );
       setShowExpeditionModal(false);
       setExpName('');
-      setStationName('');
-      setTeamSize('');
+      setSelectedMemberIds([]);
     } catch (err: any) {
       Alert.alert('Error', err.message || 'Failed to create expedition.');
     } finally {
@@ -103,7 +158,15 @@ export default function MoreScreen() {
     }
   };
 
+  // Selected catalog item for inventory creation modal
+  const [selectedCatalogItem, setSelectedCatalogItem] = useState(STANDARD_SUPPLY_CATALOG[0]);
+
   const handleCreateInventory = async () => {
+    if (!selectedCatalogItem) {
+      Alert.alert('Validation Error', 'Please select a catalog supply item.');
+      return;
+    }
+
     setSubmitting(true);
     try {
       const res = await fetch(`${BACKEND_URL}/inventory`, {
@@ -113,19 +176,23 @@ export default function MoreScreen() {
           Authorization: `Bearer ${token}`,
         },
         body: JSON.stringify({
-          name: itemName,
-          category: category,
+          name: selectedCatalogItem.name,
+          category: selectedCatalogItem.category,
           quantity: parseFloat(quantity) || 0,
-          unit: unit,
+          unit: selectedCatalogItem.unit,
           min_required: parseFloat(minReq) || 0,
-          daily_use_per_person: parseFloat(dailyUse) || 1.0,
-          location_station: stationName,
+          daily_use_per_person: parseFloat(dailyUse) || selectedCatalogItem.default_daily_use,
+          location_station: stationName || user?.station_name || 'Maitri',
+          cold_factor_sensitivity: selectedCatalogItem.cold_sensitivity,
         }),
       });
 
-      if (!res.ok) throw new Error(`HTTP status ${res.status}`);
+      if (!res.ok) {
+        const errorData = await res.json().catch(() => ({}));
+        throw new Error(errorData.detail || `HTTP status ${res.status}`);
+      }
 
-      Alert.alert('Success', 'Inventory item added to station ledger!');
+      Alert.alert('Success', `Inventory item '${selectedCatalogItem.name}' added to station stock!`);
       setShowInventoryModal(false);
     } catch (err: any) {
       Alert.alert('Error', err.message || 'Failed to add inventory item.');
@@ -181,6 +248,15 @@ export default function MoreScreen() {
             <Text style={styles.userRole}>
               {user?.role || 'Expedition Leader'} • {user?.station_name || 'Maitri'}
             </Text>
+            <Text style={styles.userRoleSubtitle}>
+              {user?.role === 'Expedition Leader'
+                ? 'Full station oversight and approvals'
+                : user?.role === 'Logistics Officer'
+                ? 'Manage cargo and inventory for your station'
+                : user?.role === 'Base Admin'
+                ? 'Manage station stock and supplies'
+                : 'Check in and report your status'}
+            </Text>
           </View>
         </View>
 
@@ -190,22 +266,22 @@ export default function MoreScreen() {
           {isLeader && (
             <TouchableOpacity
               style={styles.formButton}
-              onPress={() => setShowExpeditionModal(true)}
+              onPress={handleOpenExpeditionModal}
             >
               <MaterialIcons name="flag" size={24} color={colors.primary} />
               <Text style={styles.formButtonTitle}>Create Expedition</Text>
-              <Text style={styles.formButtonSub}>Station name & team size</Text>
+              <Text style={styles.formButtonSub}>Select station, dates & team members</Text>
             </TouchableOpacity>
           )}
 
-          {!isTeamMember && (
+          {user?.role === 'Base Admin' && (
             <TouchableOpacity
               style={styles.formButton}
               onPress={() => setShowInventoryModal(true)}
             >
               <MaterialIcons name="inventory" size={24} color={colors.accentOrange} />
               <Text style={styles.formButtonTitle}>Add Station Stock</Text>
-              <Text style={styles.formButtonSub}>Fuel, Rations, Spares</Text>
+              <Text style={styles.formButtonSub}>Select catalog & set min alert levels</Text>
             </TouchableOpacity>
           )}
 
@@ -231,7 +307,7 @@ export default function MoreScreen() {
             </Text>
           </TouchableOpacity>
 
-          {!isTeamMember && (
+          {isLeader && (
             <TouchableOpacity
               style={styles.formButton}
               onPress={() => router.push('/users')}
@@ -297,7 +373,7 @@ export default function MoreScreen() {
         {/* Create Expedition Modal */}
         <Modal visible={showExpeditionModal} animationType="slide" transparent>
           <View style={styles.modalOverlay}>
-            <View style={styles.modalCard}>
+            <View style={[styles.modalCard, { maxHeight: '85%' }]}>
               <View style={styles.modalHeader}>
                 <Text style={styles.modalTitle}>Create Active Expedition</Text>
                 <TouchableOpacity onPress={() => setShowExpeditionModal(false)}>
@@ -305,66 +381,147 @@ export default function MoreScreen() {
                 </TouchableOpacity>
               </View>
 
-              <Text style={styles.fieldLabel}>Expedition Name</Text>
-              <TextInput
-                style={styles.input}
-                value={expName}
-                onChangeText={setExpName}
-                placeholder="e.g. 45th Indian Antarctic Expedition"
-              />
+              <ScrollView showsVerticalScrollIndicator={false}>
+                {/* 1. Expedition Name */}
+                <Text style={styles.fieldLabel}>Expedition Name</Text>
+                <TextInput
+                  style={styles.input}
+                  value={expName}
+                  onChangeText={setExpName}
+                  placeholder="e.g. 45th Indian Antarctic Expedition"
+                />
 
-              <Text style={styles.fieldLabel}>Station Name</Text>
-              <TextInput
-                style={styles.input}
-                value={stationName}
-                onChangeText={setStationName}
-                placeholder="e.g. Maitri or Bharati"
-              />
-
-              <View style={{ flexDirection: 'row', gap: 8 }}>
-                <View style={{ flex: 1 }}>
-                  <Text style={styles.fieldLabel}>Latitude</Text>
-                  <TextInput
-                    style={styles.input}
-                    value={expLat}
-                    onChangeText={setExpLat}
-                    keyboardType="numeric"
-                    placeholder="-70.7660"
-                  />
+                {/* 2. Select Station from Predefined List */}
+                <Text style={styles.fieldLabel}>Select Station</Text>
+                <View style={{ flexDirection: 'row', gap: 8, marginBottom: 8 }}>
+                  {Object.keys(STATION_OPTIONS).map(st => {
+                    const active = selectedStation === st;
+                    return (
+                      <TouchableOpacity
+                        key={st}
+                        onPress={() => setSelectedStation(st)}
+                        style={[
+                          styles.input,
+                          { flex: 1, alignItems: 'center', justifyContent: 'center', backgroundColor: active ? colors.primaryIce : colors.background, borderColor: active ? colors.primary : colors.cardBorder },
+                        ]}
+                      >
+                        <Text style={{ fontFamily: typography.fontFamily.bold, color: active ? colors.primary : colors.text }}>
+                          {st}
+                        </Text>
+                      </TouchableOpacity>
+                    );
+                  })}
                 </View>
 
-                <View style={{ flex: 1 }}>
-                  <Text style={styles.fieldLabel}>Longitude</Text>
-                  <TextInput
-                    style={styles.input}
-                    value={expLon}
-                    onChangeText={setExpLon}
-                    keyboardType="numeric"
-                    placeholder="11.7330"
-                  />
+                {/* 3. Automatic Coordinates Info Box */}
+                <View style={{
+                  backgroundColor: colors.background,
+                  borderRadius: radius.default,
+                  padding: spacing.xs + 2,
+                  borderWidth: 1,
+                  borderColor: colors.cardBorder,
+                  marginBottom: spacing.xs,
+                }}>
+                  <Text style={{ fontFamily: typography.fontFamily.medium, fontSize: 11, color: colors.secondaryText }}>
+                    Station Coordinates (Auto-obtained):
+                  </Text>
+                  <Text style={{ fontFamily: typography.fontFamily.bold, fontSize: 12, color: colors.primary, marginTop: 2 }}>
+                    Latitude: {(STATION_OPTIONS[selectedStation] || STATION_OPTIONS['Maitri']).lat}° | Longitude: {(STATION_OPTIONS[selectedStation] || STATION_OPTIONS['Maitri']).lon}°
+                  </Text>
                 </View>
-              </View>
 
-              <Text style={styles.fieldLabel}>Target Team Size</Text>
-              <TextInput
-                style={styles.input}
-                value={teamSize}
-                onChangeText={setTeamSize}
-                keyboardType="numeric"
-                placeholder="e.g. 25"
-              />
+                {/* 4. Start Date & End Date */}
+                <View style={{ flexDirection: 'row', gap: 8 }}>
+                  <View style={{ flex: 1 }}>
+                    <Text style={styles.fieldLabel}>Start Date (YYYY-MM-DD)</Text>
+                    <TextInput
+                      style={styles.input}
+                      value={startDate}
+                      onChangeText={setStartDate}
+                      placeholder="2026-11-01"
+                    />
+                  </View>
 
-              <TouchableOpacity
-                style={styles.submitBtn}
-                onPress={handleCreateExpedition}
-                disabled={submitting}
-              >
-                {submitting ? (
-                  <ActivityIndicator color={colors.white} />
+                  <View style={{ flex: 1 }}>
+                    <Text style={styles.fieldLabel}>End Date (YYYY-MM-DD)</Text>
+                    <TextInput
+                      style={styles.input}
+                      value={endDate}
+                      onChangeText={setEndDate}
+                      placeholder="2027-03-31"
+                    />
+                  </View>
+                </View>
+
+                {/* 5. Assign Team Members */}
+                <Text style={styles.fieldLabel}>Assign Team Members</Text>
+                {availableUsers.length === 0 ? (
+                  <Text style={{ fontFamily: typography.fontFamily.regular, fontSize: 12, color: colors.secondaryText }}>
+                    Loading available users...
+                  </Text>
                 ) : (
-                  <Text style={styles.submitBtnText}>SAVE EXPEDITION</Text>
+                  <View style={{ gap: 6, marginBottom: spacing.xs }}>
+                    {availableUsers.map(u => {
+                      const isSelected = selectedMemberIds.includes(u.id);
+                      return (
+                        <TouchableOpacity
+                          key={u.id}
+                          onPress={() => toggleMemberSelection(u.id)}
+                          style={{
+                            flexDirection: 'row',
+                            alignItems: 'center',
+                            justifyContent: 'space-between',
+                            padding: spacing.xs + 2,
+                            borderRadius: radius.default,
+                            backgroundColor: isSelected ? colors.primaryIce : colors.background,
+                            borderWidth: 1,
+                            borderColor: isSelected ? colors.primary : colors.cardBorder,
+                          }}
+                        >
+                          <View>
+                            <Text style={{ fontFamily: typography.fontFamily.bold, fontSize: 13, color: colors.text }}>
+                              {u.username}
+                            </Text>
+                            <Text style={{ fontFamily: typography.fontFamily.regular, fontSize: 11, color: colors.secondaryText }}>
+                              {u.role}
+                            </Text>
+                          </View>
+                          <MaterialIcons
+                            name={isSelected ? 'check-box' : 'check-box-outline-blank'}
+                            size={22}
+                            color={isSelected ? colors.primary : colors.secondaryText}
+                          />
+                        </TouchableOpacity>
+                      );
+                    })}
+                  </View>
                 )}
-              </TouchableOpacity>
+
+                {/* 6. Calculated Team Size */}
+                <View style={{
+                  backgroundColor: colors.primaryIce,
+                  borderRadius: radius.default,
+                  padding: spacing.xs + 2,
+                  marginVertical: spacing.xs,
+                  alignItems: 'center',
+                }}>
+                  <Text style={{ fontFamily: typography.fontFamily.bold, fontSize: 13, color: colors.primary }}>
+                    Team Size: {selectedMemberIds.length} Assigned Member{selectedMemberIds.length !== 1 ? 's' : ''}
+                  </Text>
+                </View>
+
+                <TouchableOpacity
+                  style={styles.submitBtn}
+                  onPress={handleCreateExpedition}
+                  disabled={submitting}
+                >
+                  {submitting ? (
+                    <ActivityIndicator color={colors.white} />
+                  ) : (
+                    <Text style={styles.submitBtnText}>SAVE & CREATE EXPEDITION</Text>
+                  )}
+                </TouchableOpacity>
+              </ScrollView>
             </View>
           </View>
         </Modal>
@@ -372,7 +529,7 @@ export default function MoreScreen() {
         {/* Create Inventory Modal */}
         <Modal visible={showInventoryModal} animationType="slide" transparent>
           <View style={styles.modalOverlay}>
-            <View style={styles.modalCard}>
+            <View style={[styles.modalCard, { maxHeight: '85%' }]}>
               <View style={styles.modalHeader}>
                 <Text style={styles.modalTitle}>Add Station Stock Supply</Text>
                 <TouchableOpacity onPress={() => setShowInventoryModal(false)}>
@@ -380,37 +537,69 @@ export default function MoreScreen() {
                 </TouchableOpacity>
               </View>
 
-              <Text style={styles.fieldLabel}>Item Name</Text>
-              <TextInput style={styles.input} value={itemName} onChangeText={setItemName} />
+              <ScrollView showsVerticalScrollIndicator={false}>
+                <Text style={styles.fieldLabel}>Select Supply from Catalog</Text>
+                <ScrollView style={{ maxHeight: 150, borderWidth: 1, borderColor: colors.cardBorder, borderRadius: radius.default, marginBottom: spacing.xs, padding: 4 }}>
+                  {STANDARD_SUPPLY_CATALOG.map((catItem, idx) => {
+                    const isSelected = selectedCatalogItem.name === catItem.name;
+                    return (
+                      <TouchableOpacity
+                        key={idx}
+                        onPress={() => setSelectedCatalogItem(catItem)}
+                        style={{
+                          padding: spacing.xs,
+                          borderRadius: radius.default,
+                          backgroundColor: isSelected ? colors.primaryIce : colors.background,
+                          marginBottom: 4,
+                          borderWidth: 1,
+                          borderColor: isSelected ? colors.primary : colors.cardBorder,
+                        }}
+                      >
+                        <Text style={{ fontFamily: typography.fontFamily.bold, fontSize: 12, color: colors.text }}>
+                          {catItem.name}
+                        </Text>
+                        <Text style={{ fontFamily: typography.fontFamily.regular, fontSize: 10, color: colors.secondaryText }}>
+                          {catItem.category} • {catItem.unit}
+                        </Text>
+                      </TouchableOpacity>
+                    );
+                  })}
+                </ScrollView>
 
-              <Text style={styles.fieldLabel}>Category (Fuel, Ration, Spares, Medical)</Text>
-              <TextInput style={styles.input} value={category} onChangeText={setCategory} />
+                <View style={{
+                  backgroundColor: colors.background,
+                  borderRadius: radius.default,
+                  padding: spacing.xs + 2,
+                  borderWidth: 1,
+                  borderColor: colors.cardBorder,
+                  marginBottom: spacing.xs,
+                }}>
+                  <Text style={{ fontFamily: typography.fontFamily.medium, fontSize: 11, color: colors.secondaryText }}>
+                    Auto-Filled Catalog Properties:
+                  </Text>
+                  <Text style={{ fontFamily: typography.fontFamily.bold, fontSize: 12, color: colors.primary, marginTop: 2 }}>
+                    Category: {selectedCatalogItem.category} | Unit: {selectedCatalogItem.unit}
+                  </Text>
+                </View>
 
-              <View style={{ flexDirection: 'row', gap: 8 }}>
-                <View style={{ flex: 1 }}>
-                  <Text style={styles.fieldLabel}>Quantity</Text>
-                  <TextInput style={styles.input} value={quantity} onChangeText={setQuantity} keyboardType="numeric" />
+                <View style={{ flexDirection: 'row', gap: 8 }}>
+                  <View style={{ flex: 1 }}>
+                    <Text style={styles.fieldLabel}>Quantity ({selectedCatalogItem.unit})</Text>
+                    <TextInput style={styles.input} value={quantity} onChangeText={setQuantity} keyboardType="numeric" placeholder="100" />
+                  </View>
+                  <View style={{ flex: 1 }}>
+                    <Text style={styles.fieldLabel}>Min Alert Level ({selectedCatalogItem.unit})</Text>
+                    <TextInput style={styles.input} value={minReq} onChangeText={setMinReq} keyboardType="numeric" placeholder="20" />
+                  </View>
                 </View>
-                <View style={{ flex: 1 }}>
-                  <Text style={styles.fieldLabel}>Unit</Text>
-                  <TextInput style={styles.input} value={unit} onChangeText={setUnit} />
-                </View>
-              </View>
 
-              <View style={{ flexDirection: 'row', gap: 8 }}>
-                <View style={{ flex: 1 }}>
-                  <Text style={styles.fieldLabel}>Min Required</Text>
-                  <TextInput style={styles.input} value={minReq} onChangeText={setMinReq} keyboardType="numeric" />
-                </View>
-                <View style={{ flex: 1 }}>
-                  <Text style={styles.fieldLabel}>Daily Use/Person</Text>
-                  <TextInput style={styles.input} value={dailyUse} onChangeText={setDailyUse} keyboardType="numeric" />
-                </View>
-              </View>
+                <Text style={styles.fieldLabel}>Station Name</Text>
+                <TextInput style={styles.input} value={stationName} onChangeText={setStationName} placeholder="Maitri" />
 
-              <TouchableOpacity style={styles.submitBtn} onPress={handleCreateInventory} disabled={submitting}>
-                {submitting ? <ActivityIndicator color={colors.white} /> : <Text style={styles.submitBtnText}>ADD TO LEDGER</Text>}
-              </TouchableOpacity>
+                <TouchableOpacity style={styles.submitBtn} onPress={handleCreateInventory} disabled={submitting}>
+                  {submitting ? <ActivityIndicator color={colors.white} /> : <Text style={styles.submitBtnText}>ADD TO INVENTORY LEDGER</Text>}
+                </TouchableOpacity>
+              </ScrollView>
             </View>
           </View>
         </Modal>
@@ -465,6 +654,7 @@ const styles = StyleSheet.create({
   userInfo: { flex: 1 },
   userName: { fontFamily: typography.fontFamily.bold, fontSize: typography.fontSize.base, color: colors.text },
   userRole: { fontFamily: typography.fontFamily.regular, fontSize: typography.fontSize.xs, color: colors.secondaryText, marginTop: 2 },
+  userRoleSubtitle: { fontFamily: typography.fontFamily.regular, fontSize: 11, color: colors.primary, marginTop: 3, fontStyle: 'italic' },
   sectionHeader: { fontFamily: typography.fontFamily.bold, fontSize: typography.fontSize.base, color: colors.text },
   formButtonGrid: { gap: spacing.sm },
   formButton: {

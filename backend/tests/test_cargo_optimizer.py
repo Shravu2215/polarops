@@ -115,6 +115,76 @@ class TestCargoOptimizerSuite(unittest.TestCase):
         self.assertFalse(verify_after_data["valid"], "Audit chain must detect TAMPERING!")
         print("-> VERIFIED: Audit verification successfully detected tampered entry!")
 
+    def test_expedition_requirement_optimization_and_manifest_persistence(self):
+        reg_res = self.client.post("/auth/register", json={
+            "username": "manifest_leader",
+            "email": "manifest_leader@polarops.in",
+            "password": "manifest_test_password_2026"
+        })
+        self.assertEqual(reg_res.status_code, 200)
+
+        login_res = self.client.post("/auth/login", json={
+            "email": "manifest_leader@polarops.in",
+            "password": "manifest_test_password_2026"
+        })
+        self.assertEqual(login_res.status_code, 200)
+        token = login_res.json()["access_token"]
+        headers = {"Authorization": f"Bearer {token}"}
+
+        db = next(get_db())
+        user = db.query(models.User).filter(models.User.email == "manifest_leader@polarops.in").first()
+        if user:
+            user.role = "Expedition Leader"
+            db.commit()
+
+        expedition_res = self.client.post("/expeditions", json={
+            "name": "Manifest Expedition 1",
+            "station_name": "Maitri",
+            "latitude": -70.7660,
+            "longitude": 11.7330,
+            "start_date": "2026-01-01",
+            "end_date": "2026-12-31",
+            "target_team_size": 6,
+            "status": "Active"
+        }, headers=headers)
+        self.assertEqual(expedition_res.status_code, 200)
+        expedition_id = expedition_res.json()["id"]
+
+        for payload in [
+            {"expedition_id": expedition_id, "supply_name": "Dehydrated Ration Packs", "quantity": 14},
+            {"expedition_id": expedition_id, "supply_name": "Emergency Oxygen Cylinders", "quantity": 4},
+            {"expedition_id": expedition_id, "supply_name": "Polar Thermal Parkas (-50C Rated)", "quantity": 3},
+        ]:
+            requirement_res = self.client.post("/expedition-requirements", json=payload, headers=headers)
+            self.assertEqual(requirement_res.status_code, 200, requirement_res.text)
+
+        optimize_res = self.client.post("/cargo/optimize", json={
+            "expedition_id": expedition_id,
+            "capacity_weight_kg": 120.0,
+            "capacity_volume_m3": 4.0,
+        }, headers=headers)
+        self.assertEqual(optimize_res.status_code, 200, optimize_res.text)
+        optimize_data = optimize_res.json()
+        self.assertGreaterEqual(len(optimize_data["packed_items"]), 1)
+        self.assertIn("supply_name", optimize_data["packed_items"][0])
+
+        manifest_res = self.client.post("/cargo-manifests", json={
+            "expedition_id": expedition_id,
+            "title": "Maitri Loadout",
+            "shipment_code": "MANIFEST-101",
+            "vehicle_capacity_weight_kg": 120.0,
+            "vehicle_capacity_volume_m3": 4.0,
+            "items": optimize_data["packed_items"],
+        }, headers=headers)
+        self.assertEqual(manifest_res.status_code, 200, manifest_res.text)
+        manifest_data = manifest_res.json()
+        self.assertEqual(manifest_data["expedition_id"], expedition_id)
+        self.assertGreater(manifest_data["selected_item_count"], 0)
+
+        persisted = self.client.get(f"/cargo-manifests?expedition_id={expedition_id}", headers=headers)
+        self.assertEqual(persisted.status_code, 200)
+        self.assertGreater(len(persisted.json()), 0)
+
     def test_simulator_and_priority_sync(self):
         # Register and Login
         self.client.post("/auth/register", json={
@@ -153,7 +223,20 @@ class TestCargoOptimizerSuite(unittest.TestCase):
         }, headers=headers)
         self.assertEqual(exp_res.status_code, 200)
 
-        # 2. Add Ration item
+        # 2. Add Ration item as Base Admin
+        db = next(get_db())
+        u = db.query(models.User).filter(models.User.email == "leader2@polarops.in").first()
+        if u:
+            u.role = "Base Admin"
+            db.commit()
+
+        login_res_ba = self.client.post("/auth/login", json={
+            "email": "leader2@polarops.in",
+            "password": "leader_test_password_2026"
+        })
+        ba_token = login_res_ba.json()["access_token"]
+        headers_ba = {"Authorization": f"Bearer {ba_token}"}
+
         ration_res = self.client.post("/inventory", json={
             "name": "Emergency Ration Packs",
             "category": "Ration",
@@ -163,7 +246,7 @@ class TestCargoOptimizerSuite(unittest.TestCase):
             "daily_use_per_person": 3.0,
             "location_station": "Maitri",
             "cold_factor_sensitivity": 1.0
-        }, headers=headers)
+        }, headers=headers_ba)
         self.assertEqual(ration_res.status_code, 200)
 
         # 3. Add Fuel item
@@ -176,7 +259,7 @@ class TestCargoOptimizerSuite(unittest.TestCase):
             "daily_use_per_person": 5.0,
             "location_station": "Maitri",
             "cold_factor_sensitivity": 1.0
-        }, headers=headers)
+        }, headers=headers_ba)
         self.assertEqual(fuel_res.status_code, 200)
 
         # 4. Run /simulate with fuel_loss_percent=25.0
@@ -229,6 +312,14 @@ class TestCargoOptimizerSuite(unittest.TestCase):
         db.add(p)
         db.commit()
 
+        team_registration = self.client.post("/auth/register", json={
+            "username": "sync_team_member",
+            "email": "sync_team_member@polarops.in",
+            "password": "team_test_password_2026",
+        })
+        self.assertEqual(team_registration.status_code, 200)
+        team_headers = {"Authorization": f"Bearer {team_registration.json()['access_token']}"}
+
         # Setup client-side offline queue (Low inventory, then cargo, then SOS)
         queue = [
             {"priority": 2, "type": "inventory", "key": "idem-inv-101", "endpoint": "/inventory", "method": "POST", "body": {
@@ -240,7 +331,7 @@ class TestCargoOptimizerSuite(unittest.TestCase):
                 "priority": "High", "status": "Pending", "client_timestamp": "2026-09-21T00:00:02Z"
             }},
             {"priority": 0, "type": "sos", "key": "idem-sos-101", "endpoint": "/sos", "method": "POST", "body": {
-                "skill_needed": "Leader", "latitude": -70.7660, "longitude": 11.7330, "client_timestamp": "2026-09-21T00:00:03Z"
+                "skill_needed": "Medical", "latitude": -70.7660, "longitude": 11.7330, "client_timestamp": "2026-09-21T00:00:03Z"
             }}
         ]
 
@@ -253,7 +344,8 @@ class TestCargoOptimizerSuite(unittest.TestCase):
 
         # Execute sorted queue requests to server
         for item in sorted_queue:
-            req_headers = {**headers, "Idempotency-Key": item["key"], "Client-Timestamp": item["body"]["client_timestamp"]}
+            auth_headers = headers_ba if item["type"] == "inventory" else team_headers if item["type"] == "sos" else headers
+            req_headers = {**auth_headers, "Idempotency-Key": item["key"], "Client-Timestamp": item["body"]["client_timestamp"]}
             r = self.client.post(item["endpoint"], json=item["body"], headers=req_headers)
             self.assertEqual(r.status_code, 200, f"Failed to execute {item['type']}: {r.text}")
 
@@ -261,24 +353,24 @@ class TestCargoOptimizerSuite(unittest.TestCase):
         db = next(get_db())
         logs = db.query(models.AuditLog).order_by(models.AuditLog.id.asc()).all()
 
-        recent_actions = [l.action for l in logs if l.action in ("SOS_DISPATCH", "CARGO_CREATED", "INVENTORY_ADDED") and ("Spare Batteries" in (l.payload or "") or "CRG-TEST" in (l.payload or "") or "SOS" in l.action)]
+        recent_actions = [l.action for l in logs if l.action in ("SOS_CREATED", "CARGO_CREATED", "INVENTORY_ADDED") and ("Spare Batteries" in (l.payload or "") or "CRG-TEST" in (l.payload or "") or "SOS" in l.action)]
 
-        self.assertEqual(recent_actions[0], "SOS_DISPATCH", "Server MUST process SOS first!")
+        self.assertEqual(recent_actions[0], "SOS_CREATED", "Server MUST process SOS first!")
         self.assertEqual(recent_actions[1], "CARGO_CREATED", "Server MUST process Cargo second!")
         self.assertEqual(recent_actions[2], "INVENTORY_ADDED", "Server MUST process Inventory third!")
 
         # Test Idempotency Replay (resend SOS with identical key)
         sos_item = sorted_queue[0]
-        replay_headers = {**headers, "Idempotency-Key": sos_item["key"], "Client-Timestamp": sos_item["body"]["client_timestamp"]}
+        replay_headers = {**team_headers, "Idempotency-Key": sos_item["key"], "Client-Timestamp": sos_item["body"]["client_timestamp"]}
         replay_res = self.client.post(sos_item["endpoint"], json=sos_item["body"], headers=replay_headers)
         self.assertEqual(replay_res.status_code, 200, "Replay must return HTTP 200")
 
         # Count alerts & audit logs in DB
         db = next(get_db())
-        alert_count = db.query(models.Alert).filter(models.Alert.alert_type == "SOS").count()
-        sos_audit_count = db.query(models.AuditLog).filter(models.AuditLog.action == "SOS_DISPATCH").count()
+        sos_count = db.query(models.EmergencySOS).count()
+        sos_audit_count = db.query(models.AuditLog).filter(models.AuditLog.action == "SOS_CREATED").count()
 
-        self.assertEqual(alert_count, 1, "Idempotency replay MUST NOT create duplicate Alert!")
+        self.assertEqual(sos_count, 1, "Idempotency replay MUST NOT create duplicate SOS record!")
         self.assertEqual(sos_audit_count, 1, "Idempotency replay MUST NOT create duplicate AuditLog!")
 
 if __name__ == "__main__":

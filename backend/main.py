@@ -3,7 +3,7 @@ from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
-from sqlalchemy import text
+from sqlalchemy import inspect, text
 from typing import Optional, List, Any
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone, timedelta
@@ -21,6 +21,7 @@ from auth_utils import (
     get_current_user,
     require_leader,
     require_write_role,
+    require_base_admin,
 )
 from weather_service import fetch_real_weather
 import config
@@ -73,6 +74,19 @@ def save_idempotency(request: Request, response_status: int, response_body: Any,
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     Base.metadata.create_all(bind=engine)
+    vehicle_columns = {column["name"] for column in inspect(engine).get_columns("vehicles")}
+    vehicle_migrations = {
+        "assigned_expedition_id": "INTEGER",
+        "requested_expedition_id": "INTEGER",
+        "requested_by_id": "INTEGER",
+        "request_status": "VARCHAR(32)",
+        "is_active": "BOOLEAN NOT NULL DEFAULT TRUE",
+    }
+    with engine.begin() as connection:
+        for column_name, column_type in vehicle_migrations.items():
+            if column_name not in vehicle_columns:
+                connection.execute(text(f"ALTER TABLE vehicles ADD COLUMN {column_name} {column_type}"))
+        connection.execute(text("UPDATE vehicles SET status = 'In Use' WHERE status IN ('On-Mission', 'Dispatched')"))
     yield
 
 app = FastAPI(
@@ -116,13 +130,19 @@ class ProfileUpdateRequest(BaseModel):
 class CreateExpeditionRequest(BaseModel):
     name: str
     station_name: str
-    latitude: float
-    longitude: float
+    latitude: Optional[float] = None
+    longitude: Optional[float] = None
     start_date: str  # YYYY-MM-DD
     end_date: str
-    target_team_size: int
+    target_team_size: Optional[int] = None
+    assigned_members: Optional[List[int]] = []  # User IDs
     status: Optional[str] = "Active"
     client_timestamp: Optional[str] = None
+
+class CreateExpeditionRequirementRequest(BaseModel):
+    expedition_id: int
+    supply_name: str
+    quantity: float
 
 class CreateInventoryItemRequest(BaseModel):
     name: str
@@ -156,6 +176,23 @@ class CreateCargoRequest(BaseModel):
     expedition_id: Optional[int] = None
     client_timestamp: Optional[str] = None
 
+class CargoManifestItemRequest(BaseModel):
+    supply_name: str
+    quantity: int
+    weight_per_unit: float
+    volume_per_unit: float
+    priority: str
+    priority_value: int
+
+class CreateCargoManifestRequest(BaseModel):
+    expedition_id: int
+    title: str
+    shipment_code: str
+    vehicle_capacity_weight_kg: float
+    vehicle_capacity_volume_m3: float
+    items: List[CargoManifestItemRequest]
+    status: Optional[str] = "Packed"
+
 class UpdateCargoStatusRequest(BaseModel):
     status: str
     client_timestamp: Optional[str] = None
@@ -170,11 +207,30 @@ class CreateVehicleRequest(BaseModel):
     status: Optional[str] = "Available"
     client_timestamp: Optional[str] = None
 
+class UpdateVehicleRequest(BaseModel):
+    name: Optional[str] = None
+    type: Optional[str] = None
+    latitude: Optional[float] = None
+    longitude: Optional[float] = None
+    weather_limit: Optional[str] = None
+    station_name: Optional[str] = None
+    status: Optional[str] = None
+
+class VehicleStatusRequest(BaseModel):
+    status: str
+
+class VehicleExpeditionRequest(BaseModel):
+    expedition_id: int
+
 class SOSRequest(BaseModel):
     skill_needed: str
-    latitude: float
-    longitude: float
+    latitude: Optional[float] = None
+    longitude: Optional[float] = None
+    description: Optional[str] = None
     client_timestamp: Optional[str] = None
+
+class SOSStatusRequest(BaseModel):
+    status: str
 
 class CreatePersonRequest(BaseModel):
     name: str
@@ -535,11 +591,16 @@ def update_user_profile(
     return {"status": "profile_updated"}
 
 # --- Expeditions CRUD ---
+STATION_COORDINATES = {
+    "Maitri": {"latitude": -70.7660, "longitude": 11.7330},
+    "Bharati": {"latitude": -69.4070, "longitude": 76.1910},
+}
+
 @app.post("/expeditions")
 def create_expedition(
     req: CreateExpeditionRequest,
     request: Request,
-    current_user: models.User = Depends(require_write_role),
+    current_user: models.User = Depends(require_leader),
     db: Session = Depends(get_db)
 ):
     cached = check_idempotency(request, db)
@@ -548,21 +609,28 @@ def create_expedition(
 
     client_ts, received_at = extract_timestamps(request, req.client_timestamp)
 
-    if req.status == "Active":
-        db.query(models.Expedition).filter(models.Expedition.status == "Active").update({"status": "Completed"})
-
     start_d = datetime.strptime(req.start_date, "%Y-%m-%d").date()
     end_d = datetime.strptime(req.end_date, "%Y-%m-%d").date()
+
+    # Automatically derive coordinates from station name if available
+    coords = STATION_COORDINATES.get(req.station_name, {})
+    final_lat = coords.get("latitude", req.latitude if req.latitude is not None else -70.7660)
+    final_lon = coords.get("longitude", req.longitude if req.longitude is not None else 11.7330)
+
+    # Calculate team size automatically from assigned_members if provided
+    assigned = req.assigned_members or []
+    calculated_team_size = len(assigned) if len(assigned) > 0 else (req.target_team_size or 0)
 
     exp = models.Expedition(
         name=req.name,
         station_name=req.station_name,
-        latitude=req.latitude,
-        longitude=req.longitude,
+        latitude=final_lat,
+        longitude=final_lon,
         start_date=start_d,
         end_date=end_d,
         status=req.status or "Active",
-        target_team_size=req.target_team_size
+        target_team_size=calculated_team_size,
+        assigned_members=assigned
     )
     db.add(exp)
     db.commit()
@@ -575,7 +643,9 @@ def create_expedition(
     payload = {
         "expedition_id": exp.id,
         "name": exp.name,
+        "station_name": exp.station_name,
         "target_team_size": exp.target_team_size,
+        "assigned_members": exp.assigned_members,
         "client_timestamp": client_ts,
         "received_at": received_at
     }
@@ -597,9 +667,12 @@ def create_expedition(
         "id": exp.id,
         "name": exp.name,
         "station_name": exp.station_name,
+        "latitude": exp.latitude,
+        "longitude": exp.longitude,
         "start_date": exp.start_date.isoformat(),
         "end_date": exp.end_date.isoformat(),
         "target_team_size": exp.target_team_size,
+        "assigned_members": exp.assigned_members,
         "status": exp.status
     }
     save_idempotency(request, 200, res, db)
@@ -609,22 +682,205 @@ def create_expedition(
 def get_expeditions(current_user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
     return db.query(models.Expedition).order_by(models.Expedition.id.desc()).all()
 
+@app.get("/expeditions/{expedition_id}")
+def get_expedition_details(
+    expedition_id: int,
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    expedition = db.query(models.Expedition).filter(models.Expedition.id == expedition_id).first()
+    if not expedition:
+        raise HTTPException(status_code=404, detail="Expedition not found")
+
+    assigned_ids = [
+        user_id for user_id in (expedition.assigned_members or [])
+        if isinstance(user_id, int)
+    ]
+    assigned_users = (
+        db.query(models.User).filter(models.User.id.in_(assigned_ids)).order_by(models.User.id.asc()).all()
+        if assigned_ids else []
+    )
+    cargo_items = db.query(models.CargoShipment).filter(
+        models.CargoShipment.expedition_id == expedition.id
+    ).order_by(models.CargoShipment.id.desc()).all()
+    audit_entries = db.query(AuditLog).filter(
+        AuditLog.target_resource.in_([f"EXPEDITION-{expedition.id}", f"Expedition:{expedition.id}"])
+    ).order_by(AuditLog.id.asc()).all()
+
+    activity = []
+    for entry in audit_entries:
+        try:
+            payload = json.loads(entry.payload) if entry.payload else {}
+        except (TypeError, ValueError):
+            payload = {}
+
+        if entry.action == "EXPEDITION_CREATED":
+            summary = "Expedition record created"
+        elif entry.action == "PLAN_UPDATE":
+            summary = (
+                f"Schedule updated with {payload.get('milestones_count', 0)} milestones; "
+                f"departure deadline {payload.get('departure_deadline', 'not set')}"
+            )
+        else:
+            summary = entry.action.replace("_", " ").title()
+
+        activity.append({
+            "id": entry.id,
+            "action": entry.action,
+            "performed_by": entry.performed_by,
+            "timestamp": AuditLog.format_timestamp(entry.timestamp),
+            "summary": summary
+        })
+
+    return {
+        "id": expedition.id,
+        "name": expedition.name,
+        "station_name": expedition.station_name,
+        "latitude": expedition.latitude,
+        "longitude": expedition.longitude,
+        "start_date": expedition.start_date.isoformat() if expedition.start_date else None,
+        "end_date": expedition.end_date.isoformat() if expedition.end_date else None,
+        "status": expedition.status,
+        "target_team_size": expedition.target_team_size,
+        "assigned_members": expedition.assigned_members or [],
+        "assigned_member_details": [
+            {"id": member.id, "username": member.username, "role": member.role}
+            for member in assigned_users
+        ],
+        "departure_deadline": expedition.departure_deadline,
+        "milestones": expedition.milestones_json or [],
+        "schedule": expedition.schedule_output,
+        "cargo": [
+            {
+                "id": cargo.id,
+                "shipment_code": cargo.shipment_code,
+                "title": cargo.title,
+                "weight_kg": cargo.weight_kg,
+                "volume_m3": cargo.volume_m3,
+                "priority": cargo.priority,
+                "status": cargo.status
+            }
+            for cargo in cargo_items
+        ],
+        "activity": activity,
+        "created_at": expedition.created_at.isoformat() if expedition.created_at else None,
+        "updated_at": expedition.updated_at.isoformat() if expedition.updated_at else None
+    }
+
+# --- Supply Catalog API ---
+from supply_catalog import STANDARD_SUPPLY_CATALOG
+
+@app.get("/supply-catalog")
+def get_supply_catalog(current_user: models.User = Depends(get_current_user)):
+    return STANDARD_SUPPLY_CATALOG
+
+@app.post("/expedition-requirements")
+def create_expedition_requirement(
+    req: CreateExpeditionRequirementRequest,
+    current_user: models.User = Depends(require_leader),
+    db: Session = Depends(get_db)
+):
+    if req.quantity <= 0:
+        raise HTTPException(status_code=400, detail="Required quantity must be greater than zero")
+
+    expedition = db.query(models.Expedition).filter(models.Expedition.id == req.expedition_id).first()
+    if not expedition:
+        raise HTTPException(status_code=404, detail="Expedition not found")
+
+    catalog_item = next(
+        (item for item in STANDARD_SUPPLY_CATALOG if item["name"] == req.supply_name),
+        None
+    )
+    if not catalog_item:
+        raise HTTPException(status_code=400, detail="Supply must be selected from the catalog")
+
+    requirement = models.ExpeditionRequirement(
+        expedition_id=expedition.id,
+        requested_by_id=current_user.id,
+        supply_name=catalog_item["name"],
+        category=catalog_item["category"],
+        quantity=req.quantity,
+        unit=catalog_item["unit"],
+        status="Requested"
+    )
+    db.add(requirement)
+    db.commit()
+    db.refresh(requirement)
+
+    return {
+        "id": requirement.id,
+        "expedition_id": requirement.expedition_id,
+        "requested_by_id": requirement.requested_by_id,
+        "supply_name": requirement.supply_name,
+        "category": requirement.category,
+        "quantity": requirement.quantity,
+        "unit": requirement.unit,
+        "status": requirement.status,
+        "created_at": requirement.created_at.isoformat()
+    }
+
+@app.get("/expedition-requirements")
+def get_expedition_requirements(
+    expedition_id: Optional[int] = None,
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    query = db.query(models.ExpeditionRequirement)
+    if current_user.role in ("Logistics Officer", "Base Admin"):
+        query = query.join(
+            models.Expedition,
+            models.Expedition.id == models.ExpeditionRequirement.expedition_id
+        ).filter(models.Expedition.station_name == current_user.station_name)
+    elif current_user.role != "Expedition Leader":
+        raise HTTPException(status_code=403, detail="Forbidden: Supply requirements are not available to this role")
+
+    if expedition_id is not None:
+        query = query.filter(models.ExpeditionRequirement.expedition_id == expedition_id)
+
+    requirements = query.order_by(models.ExpeditionRequirement.id.desc()).all()
+    return [
+        {
+            "id": requirement.id,
+            "expedition_id": requirement.expedition_id,
+            "requested_by_id": requirement.requested_by_id,
+            "supply_name": requirement.supply_name,
+            "category": requirement.category,
+            "quantity": requirement.quantity,
+            "unit": requirement.unit,
+            "status": requirement.status,
+            "created_at": requirement.created_at.isoformat()
+        }
+        for requirement in requirements
+    ]
+
 # --- Inventory CRUD ---
 @app.post("/inventory")
 def create_inventory_item(
     req: CreateInventoryItemRequest,
     request: Request,
-    current_user: models.User = Depends(require_write_role),
+    current_user: models.User = Depends(require_base_admin),
     db: Session = Depends(get_db)
 ):
     cached = check_idempotency(request, db)
     if cached:
         return cached
 
+    # Check for duplicate supply name in the same station inventory
+    existing = db.query(models.InventoryItem).filter(
+        models.InventoryItem.name.ilike(req.name.strip()),
+        models.InventoryItem.location_station == req.location_station
+    ).first()
+
+    if existing:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Supply '{req.name}' already exists in {req.location_station} station inventory. Please update the existing stock level instead."
+        )
+
     client_ts, received_at = extract_timestamps(request, req.client_timestamp)
 
     item = models.InventoryItem(
-        name=req.name,
+        name=req.name.strip(),
         category=req.category,
         quantity=req.quantity,
         unit=req.unit,
@@ -682,7 +938,7 @@ def update_inventory_item(
     item_id: int,
     req: UpdateInventoryItemRequest,
     request: Request,
-    current_user: models.User = Depends(require_write_role),
+    current_user: models.User = Depends(require_base_admin),
     db: Session = Depends(get_db)
 ):
     cached = check_idempotency(request, db)
@@ -904,7 +1160,7 @@ def get_cargo(current_user: models.User = Depends(get_current_user), db: Session
 def create_vehicle(
     req: CreateVehicleRequest,
     request: Request,
-    current_user: models.User = Depends(require_write_role),
+    current_user: models.User = Depends(require_base_admin),
     db: Session = Depends(get_db)
 ):
     cached = check_idempotency(request, db)
@@ -913,6 +1169,9 @@ def create_vehicle(
 
     client_ts, received_at = extract_timestamps(request, req.client_timestamp)
 
+    if req.status not in (None, "Available", "In Use", "Maintenance", "Unavailable"):
+        raise HTTPException(status_code=400, detail="Invalid vehicle status")
+
     v = models.Vehicle(
         name=req.name,
         type=req.type,
@@ -920,7 +1179,8 @@ def create_vehicle(
         longitude=req.longitude,
         weather_limit=req.weather_limit,
         station_name=req.station_name,
-        status=req.status or "Available"
+        status=req.status or "Available",
+        is_active=True,
     )
     db.add(v)
     db.commit()
@@ -959,14 +1219,195 @@ def create_vehicle(
         "longitude": v.longitude,
         "status": v.status,
         "weather_limit": v.weather_limit,
-        "station_name": v.station_name
+        "station_name": v.station_name,
+        "assigned_expedition_id": v.assigned_expedition_id,
+        "requested_expedition_id": v.requested_expedition_id,
+        "request_status": v.request_status,
+        "is_active": v.is_active,
     }
     save_idempotency(request, 200, res, db)
     return res
 
 @app.get("/vehicles")
 def get_vehicles(current_user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
-    return db.query(models.Vehicle).all()
+    query = db.query(models.Vehicle)
+    if current_user.role == "Team Member":
+        assigned_expedition_ids = [
+            expedition.id for expedition in db.query(models.Expedition).all()
+            if any(
+                member_id == current_user.id
+                or (isinstance(member_id, str) and member_id.lower() == current_user.username.lower())
+                for member_id in (expedition.assigned_members or [])
+            )
+        ]
+        if not assigned_expedition_ids:
+            return []
+        query = query.filter(
+            models.Vehicle.assigned_expedition_id.in_(assigned_expedition_ids),
+            models.Vehicle.is_active.is_(True),
+        )
+    elif current_user.role in ("Base Admin", "Logistics Officer", "Expedition Leader"):
+        query = query.filter(models.Vehicle.station_name == (current_user.station_name or "Maitri"))
+        if current_user.role != "Base Admin":
+            query = query.filter(models.Vehicle.is_active.is_(True))
+        if current_user.role == "Expedition Leader":
+            query = query.filter(
+                (models.Vehicle.status == "Available")
+                | (models.Vehicle.requested_by_id == current_user.id)
+                | (models.Vehicle.assigned_expedition_id.is_not(None))
+            )
+    else:
+        raise HTTPException(status_code=403, detail="Forbidden: fleet is not available to this role")
+
+    return [
+        {
+            "id": vehicle.id,
+            "name": vehicle.name,
+            "type": vehicle.type,
+            "latitude": vehicle.latitude,
+            "longitude": vehicle.longitude,
+            "status": vehicle.status,
+            "weather_limit": vehicle.weather_limit,
+            "station_name": vehicle.station_name,
+            "assigned_expedition_id": vehicle.assigned_expedition_id,
+            "assigned_expedition_name": (
+                db.query(models.Expedition.name).filter(models.Expedition.id == vehicle.assigned_expedition_id).scalar()
+                if vehicle.assigned_expedition_id is not None else None
+            ),
+            "requested_expedition_id": vehicle.requested_expedition_id,
+            "requested_expedition_name": (
+                db.query(models.Expedition.name).filter(models.Expedition.id == vehicle.requested_expedition_id).scalar()
+                if vehicle.requested_expedition_id is not None else None
+            ),
+            "request_status": vehicle.request_status,
+            "is_active": vehicle.is_active,
+        }
+        for vehicle in query.order_by(models.Vehicle.id.desc()).all()
+    ]
+
+
+@app.patch("/vehicles/{vehicle_id}")
+def update_vehicle(
+    vehicle_id: int,
+    req: UpdateVehicleRequest,
+    current_user: models.User = Depends(require_base_admin),
+    db: Session = Depends(get_db),
+):
+    vehicle = db.query(models.Vehicle).filter(models.Vehicle.id == vehicle_id).first()
+    if not vehicle:
+        raise HTTPException(status_code=404, detail="Vehicle not found")
+    if not vehicle.is_active:
+        raise HTTPException(status_code=409, detail="Deactivated vehicles cannot be edited")
+    if req.status is not None and req.status not in ("Available", "In Use", "Maintenance", "Unavailable"):
+        raise HTTPException(status_code=400, detail="Invalid vehicle status")
+
+    for field_name in ("name", "type", "latitude", "longitude", "weather_limit", "station_name", "status"):
+        value = getattr(req, field_name)
+        if value is not None:
+            setattr(vehicle, field_name, value)
+    vehicle.updated_at = datetime.now(timezone.utc)
+    db.commit()
+    db.refresh(vehicle)
+    return {"id": vehicle.id, "status": vehicle.status, "is_active": vehicle.is_active}
+
+
+@app.patch("/vehicles/{vehicle_id}/status")
+def update_vehicle_status(
+    vehicle_id: int,
+    req: VehicleStatusRequest,
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    if current_user.role not in ("Base Admin", "Logistics Officer"):
+        raise HTTPException(status_code=403, detail="Only Base Admin or Logistics Officer can update fleet status")
+    vehicle = db.query(models.Vehicle).filter(models.Vehicle.id == vehicle_id).first()
+    if not vehicle or not vehicle.is_active:
+        raise HTTPException(status_code=404, detail="Active vehicle not found")
+    if vehicle.station_name != (current_user.station_name or "Maitri"):
+        raise HTTPException(status_code=403, detail="Vehicle is outside your station")
+    if req.status not in ("Available", "In Use", "Maintenance", "Unavailable"):
+        raise HTTPException(status_code=400, detail="Status must be Available, In Use, Maintenance, or Unavailable")
+
+    vehicle.status = req.status
+    vehicle.updated_at = datetime.now(timezone.utc)
+    if req.status == "Available":
+        vehicle.assigned_expedition_id = None
+    db.commit()
+    db.refresh(vehicle)
+    return {"id": vehicle.id, "status": vehicle.status}
+
+
+@app.post("/vehicles/{vehicle_id}/request")
+def request_vehicle_for_expedition(
+    vehicle_id: int,
+    req: VehicleExpeditionRequest,
+    current_user: models.User = Depends(require_leader),
+    db: Session = Depends(get_db),
+):
+    vehicle = db.query(models.Vehicle).filter(models.Vehicle.id == vehicle_id).first()
+    if not vehicle or not vehicle.is_active:
+        raise HTTPException(status_code=404, detail="Active vehicle not found")
+    expedition = db.query(models.Expedition).filter(models.Expedition.id == req.expedition_id).first()
+    if not expedition or expedition.station_name != (current_user.station_name or "Maitri"):
+        raise HTTPException(status_code=404, detail="Expedition not found at your station")
+    if vehicle.station_name != expedition.station_name:
+        raise HTTPException(status_code=400, detail="Vehicle and expedition must be at the same station")
+    if vehicle.status != "Available" or vehicle.request_status == "Requested":
+        raise HTTPException(status_code=409, detail="Vehicle is not available for a new request")
+
+    vehicle.requested_expedition_id = expedition.id
+    vehicle.requested_by_id = current_user.id
+    vehicle.request_status = "Requested"
+    vehicle.updated_at = datetime.now(timezone.utc)
+    db.commit()
+    return {"id": vehicle.id, "request_status": vehicle.request_status, "requested_expedition_id": expedition.id}
+
+
+@app.post("/vehicles/{vehicle_id}/assign")
+def assign_vehicle_to_expedition(
+    vehicle_id: int,
+    req: VehicleExpeditionRequest,
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    if current_user.role not in ("Base Admin", "Logistics Officer"):
+        raise HTTPException(status_code=403, detail="Only Base Admin or Logistics Officer can assign vehicles")
+    vehicle = db.query(models.Vehicle).filter(models.Vehicle.id == vehicle_id).first()
+    if not vehicle or not vehicle.is_active:
+        raise HTTPException(status_code=404, detail="Active vehicle not found")
+    if vehicle.station_name != (current_user.station_name or "Maitri"):
+        raise HTTPException(status_code=403, detail="Vehicle is outside your station")
+    expedition = db.query(models.Expedition).filter(models.Expedition.id == req.expedition_id).first()
+    if not expedition or expedition.station_name != vehicle.station_name:
+        raise HTTPException(status_code=404, detail="Expedition not found at this station")
+    if vehicle.status not in ("Available", "In Use"):
+        raise HTTPException(status_code=409, detail=f"Vehicle cannot be assigned while {vehicle.status}")
+
+    vehicle.assigned_expedition_id = expedition.id
+    vehicle.status = "In Use"
+    if vehicle.requested_expedition_id == expedition.id:
+        vehicle.request_status = "Approved"
+    vehicle.updated_at = datetime.now(timezone.utc)
+    db.commit()
+    return {"id": vehicle.id, "status": vehicle.status, "assigned_expedition_id": expedition.id}
+
+
+@app.patch("/vehicles/{vehicle_id}/deactivate")
+def deactivate_vehicle(
+    vehicle_id: int,
+    current_user: models.User = Depends(require_base_admin),
+    db: Session = Depends(get_db),
+):
+    vehicle = db.query(models.Vehicle).filter(models.Vehicle.id == vehicle_id).first()
+    if not vehicle:
+        raise HTTPException(status_code=404, detail="Vehicle not found")
+    vehicle.is_active = False
+    vehicle.status = "Unavailable"
+    if vehicle.request_status == "Requested":
+        vehicle.request_status = "Closed"
+    vehicle.updated_at = datetime.now(timezone.utc)
+    db.commit()
+    return {"id": vehicle.id, "is_active": vehicle.is_active, "status": vehicle.status}
 
 
 # --- People Routes ---
@@ -1172,9 +1613,113 @@ def save_planner_schedule(
 def get_alerts(current_user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
     return db.query(models.Alert).order_by(models.Alert.created_at.desc()).all()
 
-# --- Real SOS Dispatch Route with 10-Min Location Freshness Filter ---
+# --- Shared, persisted SOS workflow ---
+SOS_ASSISTANCE_TYPES = {
+    "doctor": "Medical",
+    "medical": "Medical",
+    "mechanic": "Vehicle Mechanic",
+    "vehicle mechanic": "Vehicle Mechanic",
+    "pilot": "SAR Helicopter Pilot",
+    "sar helicopter pilot": "SAR Helicopter Pilot",
+}
+SOS_STATUSES = ("ACTIVE", "ACKNOWLEDGED", "RESPONDING", "RESOLVED")
+SOS_VEHICLE_ASSISTANCE = {"Vehicle Mechanic", "SAR Helicopter Pilot"}
+
+
+def _sos_assigned_expeditions(db: Session, user: models.User):
+    station_expeditions = db.query(models.Expedition).filter(
+        models.Expedition.station_name == (user.station_name or "Maitri")
+    ).order_by(models.Expedition.id.desc()).all()
+    return [
+        expedition for expedition in station_expeditions
+        if user.id in (expedition.assigned_members or [])
+    ]
+
+
+def _sos_can_view_or_manage(db: Session, current_user: models.User, sos: models.EmergencySOS) -> bool:
+    if sos.user_id == current_user.id:
+        return True
+
+    if current_user.role == "Expedition Leader":
+        if sos.station_name != (current_user.station_name or "Maitri") or sos.expedition_id is None:
+            return False
+        expedition = db.query(models.Expedition).filter(
+            models.Expedition.id == sos.expedition_id
+        ).first()
+        return bool(
+            expedition
+            and expedition.station_name == sos.station_name
+            and sos.user_id in (expedition.assigned_members or [])
+        )
+
+    if current_user.role == "Base Admin":
+        return sos.station_name == (current_user.station_name or "Maitri")
+
+    if current_user.role == "Logistics Officer":
+        return (
+            sos.station_name == (current_user.station_name or "Maitri")
+            and sos.assistance_required in SOS_VEHICLE_ASSISTANCE
+        )
+
+    return sos.user_id == current_user.id
+
+
+def _serialize_sos(db: Session, sos: models.EmergencySOS):
+    sender = db.query(models.User).filter(models.User.id == sos.user_id).first()
+    expedition = (
+        db.query(models.Expedition).filter(models.Expedition.id == sos.expedition_id).first()
+        if sos.expedition_id is not None else None
+    )
+    return {
+        "id": sos.id,
+        "user_id": sos.user_id,
+        "person_name": sender.username if sender else "Unknown user",
+        "person_role": sender.role if sender else "Unknown role",
+        "expedition_id": sos.expedition_id,
+        "expedition_name": expedition.name if expedition else None,
+        "station_name": sos.station_name,
+        "latitude": sos.latitude,
+        "longitude": sos.longitude,
+        "assistance_required": sos.assistance_required,
+        "description": sos.description,
+        "status": sos.status,
+        "created_at": AuditLog.format_timestamp(sos.created_at),
+        "updated_at": AuditLog.format_timestamp(sos.updated_at),
+    }
+
+
+@app.get("/sos/context")
+def get_sos_context(
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    assigned_expeditions = _sos_assigned_expeditions(db, current_user)
+    expedition = next(
+        (item for item in assigned_expeditions if item.status == "Active"),
+        None
+    )
+    if expedition is None:
+        expedition = db.query(models.Expedition).filter(
+            models.Expedition.station_name == (current_user.station_name or "Maitri"),
+            models.Expedition.status == "Active"
+        ).order_by(models.Expedition.id.desc()).first()
+
+    return {
+        "user_id": current_user.id,
+        "person_name": current_user.username,
+        "role": current_user.role,
+        "station_name": current_user.station_name or "Maitri",
+        "latitude": current_user.latitude,
+        "longitude": current_user.longitude,
+        "expedition_id": expedition.id if expedition else None,
+        "expedition_name": expedition.name if expedition else None,
+        "expedition_latitude": expedition.latitude if expedition else None,
+        "expedition_longitude": expedition.longitude if expedition else None,
+    }
+
+
 @app.post("/sos")
-def trigger_sos(
+def create_sos(
     req: SOSRequest,
     request: Request,
     current_user: models.User = Depends(get_current_user),
@@ -1184,139 +1729,195 @@ def trigger_sos(
     if cached:
         return cached
 
-    client_ts, received_at = extract_timestamps(request, req.client_timestamp)
-    skill_target = req.skill_needed.lower()
-    cutoff_time = datetime.now(timezone.utc) - timedelta(minutes=10)
+    assistance_required = SOS_ASSISTANCE_TYPES.get(req.skill_needed.strip().lower())
+    if not assistance_required:
+        raise HTTPException(status_code=400, detail="Select Medical, Vehicle Mechanic, or SAR Helicopter Pilot")
+    if (req.latitude is None) != (req.longitude is None):
+        raise HTTPException(status_code=400, detail="Both GPS coordinates must be provided together")
 
-    # Query all People who have updated location in the LAST 10 MINUTES
-    fresh_people = db.query(models.Person).filter(
-        (models.Person.last_location_update >= cutoff_time) |
-        (models.Person.updated_at >= cutoff_time)
-    ).all()
+    assigned_expeditions = _sos_assigned_expeditions(db, current_user)
+    expedition = next((item for item in assigned_expeditions if item.status == "Active"), None)
+    if expedition is None:
+        expedition = db.query(models.Expedition).filter(
+            models.Expedition.station_name == (current_user.station_name or "Maitri"),
+            models.Expedition.status == "Active"
+        ).order_by(models.Expedition.id.desc()).first()
 
-    # Filter for people matching skill_needed
-    matching_people = []
-    for p in fresh_people:
-        skills_lower = [s.lower() for s in (p.skills or [])]
-        if skill_target in skills_lower or skill_target in (p.role or "").lower():
-            matching_people.append(p)
+    latitude = req.latitude if req.latitude is not None else current_user.latitude
+    longitude = req.longitude if req.longitude is not None else current_user.longitude
+    if latitude is None or longitude is None:
+        latitude = expedition.latitude if expedition else None
+        longitude = expedition.longitude if expedition else None
+    if latitude is None or longitude is None:
+        raise HTTPException(status_code=422, detail="Current GPS location is unavailable")
 
-    if not matching_people:
-        res = {
-            "status": "No Responder Available",
-            "message": f"No responder with '{req.skill_needed}' skill has updated location in the last 10 minutes."
-        }
-        save_idempotency(request, 200, res, db)
-        return res
+    now_dt = datetime.now(timezone.utc)
+    current_user.latitude = latitude
+    current_user.longitude = longitude
+    current_user.last_location_update = now_dt
+    linked_person = db.query(models.Person).filter(models.Person.user_id == current_user.id).first()
+    if linked_person:
+        linked_person.latitude = latitude
+        linked_person.longitude = longitude
+        linked_person.last_location_update = now_dt
 
-    nearest_person = None
-    min_person_dist = float("inf")
-    for p in matching_people:
-        dist = haversine_km(req.latitude, req.longitude, p.latitude, p.longitude)
-        if dist < min_person_dist:
-            min_person_dist = dist
-            nearest_person = p
-
-    if nearest_person:
-        nearest_person.status = "On-Mission"
-
-    # Find nearest Available Vehicle
-    available_vehicles = db.query(models.Vehicle).filter(models.Vehicle.status == "Available").all()
-    if not available_vehicles:
-        available_vehicles = db.query(models.Vehicle).all()
-
-    nearest_vehicle = None
-    min_vehicle_dist = float("inf")
-    for v in available_vehicles:
-        dist = haversine_km(req.latitude, req.longitude, v.latitude, v.longitude)
-        if dist < min_vehicle_dist:
-            min_vehicle_dist = dist
-            nearest_vehicle = v
-
-    if nearest_vehicle:
-        nearest_vehicle.status = "Dispatched"
-
-    # Create Alert
-    responder_name = nearest_person.name if nearest_person else "Base Team"
-    vehicle_name = nearest_vehicle.name if nearest_vehicle else "Emergency Sno-Cat"
-
-    new_alert = models.Alert(
-        alert_type="SOS",
-        title=f"SOS Dispatch - {req.skill_needed.capitalize()} Required",
-        message=f"Dispatched responder {responder_name} with vehicle {vehicle_name} to ({req.latitude:.4f}, {req.longitude:.4f}).",
-        severity="Critical",
-        latitude=req.latitude,
-        longitude=req.longitude,
-        status="Active"
+    emergency = models.EmergencySOS(
+        user_id=current_user.id,
+        expedition_id=expedition.id if expedition else None,
+        station_name=current_user.station_name or (expedition.station_name if expedition else "Maitri"),
+        latitude=latitude,
+        longitude=longitude,
+        assistance_required=assistance_required,
+        description=(req.description or "").strip() or None,
+        status="ACTIVE",
+        created_at=now_dt,
+        updated_at=now_dt,
     )
-    db.add(new_alert)
+    db.add(emergency)
     db.commit()
-    db.refresh(new_alert)
+    db.refresh(emergency)
 
-    # Hash Chain Audit
     last_log = db.query(AuditLog).order_by(AuditLog.id.desc()).first()
     prev_hash = last_log.hash if last_log else ("0" * 64)
-    now_dt = datetime.now(timezone.utc)
-
-    resp_dist = round(min_person_dist, 2) if min_person_dist != float("inf") else 0.0
-    veh_dist = round(min_vehicle_dist, 2) if min_vehicle_dist != float("inf") else 0.0
-
-    payload_dict = {
-        "alert_id": new_alert.id,
-        "skill_requested": req.skill_needed,
-        "responder": responder_name,
-        "responder_distance_km": resp_dist,
-        "vehicle": vehicle_name,
-        "vehicle_distance_km": veh_dist,
-        "client_timestamp": client_ts,
-        "received_at": received_at
+    payload = {
+        "sos_id": emergency.id,
+        "user_id": current_user.id,
+        "expedition_id": emergency.expedition_id,
+        "station_name": emergency.station_name,
+        "assistance_required": emergency.assistance_required,
+        "latitude": emergency.latitude,
+        "longitude": emergency.longitude,
+        "description": emergency.description,
     }
-
-    new_hash = AuditLog.compute_hash("SOS_DISPATCH", current_user.username, f"ALERT-{new_alert.id}", payload_dict, now_dt, prev_hash)
-    audit_entry = AuditLog(
-        action="SOS_DISPATCH",
+    entry_hash = AuditLog.compute_hash(
+        "SOS_CREATED", current_user.username, f"SOS-{emergency.id}", payload, now_dt, prev_hash
+    )
+    db.add(AuditLog(
+        action="SOS_CREATED",
         performed_by=current_user.username,
-        target_resource=f"ALERT-{new_alert.id}",
-        payload=AuditLog.serialize_payload(payload_dict),
+        target_resource=f"SOS-{emergency.id}",
+        payload=AuditLog.serialize_payload(payload),
         timestamp=now_dt,
         prev_hash=prev_hash,
-        hash=new_hash
-    )
-    db.add(audit_entry)
+        hash=entry_hash,
+    ))
     db.commit()
 
-    res = {
-        "status": "Dispatched",
-        "responder_name": responder_name,
-        "responder_role": nearest_person.role if nearest_person else "Responder",
-        "responder_distance_km": resp_dist,
-        "vehicle_name": vehicle_name,
-        "vehicle_distance_km": veh_dist,
-        "alert_id": new_alert.id,
-        "audit_hash": audit_entry.hash
+    result = _serialize_sos(db, emergency)
+    save_idempotency(request, 200, result, db)
+    return result
+
+
+@app.get("/sos")
+def get_sos_records(
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    if current_user.role not in ("Team Member", "Expedition Leader", "Base Admin", "Logistics Officer"):
+        raise HTTPException(status_code=403, detail="Forbidden: SOS records are not available to this role")
+
+    records = db.query(models.EmergencySOS).order_by(models.EmergencySOS.created_at.desc()).all()
+    return [
+        _serialize_sos(db, emergency)
+        for emergency in records
+        if _sos_can_view_or_manage(db, current_user, emergency)
+    ]
+
+
+@app.patch("/sos/{sos_id}/status")
+def update_sos_status(
+    sos_id: int,
+    req: SOSStatusRequest,
+    request: Request,
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    cached = check_idempotency(request, db)
+    if cached:
+        return cached
+
+    emergency = db.query(models.EmergencySOS).filter(models.EmergencySOS.id == sos_id).first()
+    if not emergency:
+        raise HTTPException(status_code=404, detail="SOS record not found")
+    if current_user.role not in ("Expedition Leader", "Base Admin", "Logistics Officer"):
+        raise HTTPException(status_code=403, detail="Forbidden: only station responders can update SOS status")
+    if not _sos_can_view_or_manage(db, current_user, emergency):
+        raise HTTPException(status_code=403, detail="Forbidden: this SOS is outside your response scope")
+
+    next_status = req.status.strip().upper()
+    if next_status not in SOS_STATUSES:
+        raise HTTPException(status_code=400, detail=f"Status must be one of {', '.join(SOS_STATUSES)}")
+    current_index = SOS_STATUSES.index(emergency.status)
+    next_index = SOS_STATUSES.index(next_status)
+    if next_index != current_index + 1:
+        raise HTTPException(status_code=409, detail=f"SOS status can only advance from {emergency.status} to the next stage")
+
+    previous_status = emergency.status
+    emergency.status = next_status
+    emergency.updated_at = datetime.now(timezone.utc)
+    db.commit()
+    db.refresh(emergency)
+
+    last_log = db.query(AuditLog).order_by(AuditLog.id.desc()).first()
+    prev_hash = last_log.hash if last_log else ("0" * 64)
+    payload = {
+        "sos_id": emergency.id,
+        "previous_status": previous_status,
+        "status": emergency.status,
     }
-    save_idempotency(request, 200, res, db)
-    return res
+    entry_hash = AuditLog.compute_hash(
+        "SOS_STATUS_UPDATED", current_user.username, f"SOS-{emergency.id}",
+        payload, emergency.updated_at, prev_hash
+    )
+    db.add(AuditLog(
+        action="SOS_STATUS_UPDATED",
+        performed_by=current_user.username,
+        target_resource=f"SOS-{emergency.id}",
+        payload=AuditLog.serialize_payload(payload),
+        timestamp=emergency.updated_at,
+        prev_hash=prev_hash,
+        hash=entry_hash,
+    ))
+    db.commit()
+
+    result = _serialize_sos(db, emergency)
+    save_idempotency(request, 200, result, db)
+    return result
 
 
 # --- Strict DB-Computed Dashboard Summary Route ---
 @app.get("/dashboard/summary")
 async def get_dashboard_summary(current_user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
-    active_exp = db.query(models.Expedition).filter(models.Expedition.status == "Active").first()
-    
+    # 1. Determine User's Relevant Active Expedition & Station
+    user_station = current_user.station_name or "Maitri"
+
+    # Find active expedition (user's assigned expedition if team member/assigned, or station active expedition)
+    active_exp = db.query(models.Expedition).filter(models.Expedition.status == "Active").order_by(models.Expedition.id.desc()).first()
+
+    # If team member is assigned to a specific active expedition, prefer that
+    user_assigned_exp = None
+    all_active_exps = db.query(models.Expedition).filter(models.Expedition.status == "Active").all()
+    for exp in all_active_exps:
+        if exp.assigned_members and current_user.id in exp.assigned_members:
+            user_assigned_exp = exp
+            break
+
+    effective_exp = user_assigned_exp or active_exp
+
     survival_days = None
     weather_data = None
     exp_temp = None
     is_weather_estimated = False
-    
-    if active_exp:
-        station_name = active_exp.station_name
-        team_size = active_exp.target_team_size or 6
+    expedition_info = None
 
-        exp_lat = getattr(active_exp, 'latitude', None)
-        exp_lon = getattr(active_exp, 'longitude', None)
+    if effective_exp:
+        station_name = effective_exp.station_name
+        team_size = effective_exp.target_team_size or 6
 
-        # 1. Fetch Real Live Weather from Open-Meteo using real stored coordinates
+        exp_lat = getattr(effective_exp, 'latitude', None)
+        exp_lon = getattr(effective_exp, 'longitude', None)
+
+        # Fetch Real Live Weather from Open-Meteo using real stored coordinates
         if exp_lat is not None and exp_lon is not None:
             weather_data = await fetch_real_weather(
                 latitude=exp_lat,
@@ -1331,10 +1932,10 @@ async def get_dashboard_summary(current_user: models.User = Depends(get_current_
             exp_temp = -30.0  # Fallback temperature for survival calculation
             is_weather_estimated = True
 
-        # 2. Survival Days computed at station weather temperature using cold_factor
+        # Survival Days computed at station weather temperature using cold_factor
         station_items = db.query(models.InventoryItem).filter(
             models.InventoryItem.location_station == station_name,
-            models.InventoryItem.category.in_(["Fuel", "Ration"])
+            models.InventoryItem.category.in_(["Fuel", "Ration", "Food & Water", "Fuel & Energy"])
         ).all()
 
         days_list = []
@@ -1347,20 +1948,101 @@ async def get_dashboard_summary(current_user: models.User = Depends(get_current_
         if days_list:
             survival_days = round(min(days_list), 1)
 
-    # 3. Personnel on Field: Count users/people with location update in the LAST 10 MINUTES
-    cutoff_10m = datetime.now(timezone.utc) - timedelta(minutes=10)
-    personnel_on_field_count = db.query(models.User).filter(
-        models.User.last_location_update >= cutoff_10m
-    ).count()
+        # Calculate days remaining until end_date
+        days_remaining = None
+        if effective_exp.end_date:
+            today_d = datetime.now(timezone.utc).date()
+            diff_d = (effective_exp.end_date - today_d).days
+            days_remaining = max(0, diff_d)
 
-    # 4. Aggregated Counts
-    active_expeditions_count = db.query(models.Expedition).filter(models.Expedition.status == "Active").count()
-    cargo_in_transit_count = db.query(models.CargoShipment).filter(models.CargoShipment.status == "In-Transit").count()
-    
-    all_inventory = db.query(models.InventoryItem).all()
-    low_stock_count = sum(1 for i in all_inventory if i.quantity <= i.min_required)
+        # Fetch assigned members details
+        assigned_user_ids = effective_exp.assigned_members or []
+        assigned_members_list = []
+        if assigned_user_ids:
+            assigned_users = db.query(models.User).filter(models.User.id.in_(assigned_user_ids)).all()
+            cutoff_10m = datetime.utcnow() - timedelta(minutes=10)  # naive UTC to match SQLite stored datetimes
+            for u in assigned_users:
+                is_active_now = u.last_location_update and u.last_location_update >= cutoff_10m
+                assigned_members_list.append({
+                    "id": u.id,
+                    "username": u.username,
+                    "role": u.role,
+                    "status": "Online / Active" if is_active_now else "Offline / Standby",
+                    "last_seen": u.last_location_update.isoformat() if u.last_location_update else None
+                })
 
-    # 5. Latest 5 Alerts
+        expedition_info = {
+            "id": effective_exp.id,
+            "name": effective_exp.name,
+            "station_name": effective_exp.station_name,
+            "latitude": effective_exp.latitude,
+            "longitude": effective_exp.longitude,
+            "start_date": effective_exp.start_date.isoformat() if effective_exp.start_date else None,
+            "end_date": effective_exp.end_date.isoformat() if effective_exp.end_date else None,
+            "days_remaining": days_remaining,
+            "target_team_size": effective_exp.target_team_size,
+            "assigned_members_count": len(assigned_user_ids),
+            "assigned_members": assigned_members_list,
+            "status": effective_exp.status
+        }
+    else:
+        # Fallback station weather if no active expedition exists
+        weather_data = await fetch_real_weather(latitude=-70.7660, longitude=11.7330, station_name=user_station)
+
+    # 2. Team Roster & Personnel on Field (All Users registered in backend)
+    cutoff_10m = datetime.utcnow() - timedelta(minutes=10)  # naive UTC to match SQLite stored datetimes
+    all_users = db.query(models.User).order_by(models.User.id.desc()).all()
+    team_roster = []
+    personnel_active_count = 0
+
+    for u in all_users:
+        is_active = u.last_location_update and u.last_location_update >= cutoff_10m
+        if is_active:
+            personnel_active_count += 1
+        team_roster.append({
+            "id": u.id,
+            "username": u.username,
+            "email": u.email,
+            "role": u.role,
+            "station_name": u.station_name or "Maitri",
+            "status": "Online / Active" if is_active else "Offline / Standby",
+            "last_location_update": u.last_location_update.isoformat() if u.last_location_update else None
+        })
+
+    # 3. Cargo Shipments Summary
+    all_cargo = db.query(models.CargoShipment).order_by(models.CargoShipment.id.desc()).all()
+    cargo_in_transit_count = sum(1 for c in all_cargo if c.status == "In-Transit")
+    cargo_delivered_count = sum(1 for c in all_cargo if c.status == "Delivered")
+    cargo_pending_count = sum(1 for c in all_cargo if c.status == "Pending")
+    cargo_summary_list = [
+        {
+            "id": c.id,
+            "shipment_code": c.shipment_code,
+            "title": c.title,
+            "weight_kg": c.weight_kg,
+            "volume_m3": c.volume_m3,
+            "priority": c.priority,
+            "status": c.status
+        }
+        for c in all_cargo[:5]
+    ]
+
+    # 4. Inventory Stock & Low Stock Items
+    all_inventory = db.query(models.InventoryItem).order_by(models.InventoryItem.id.asc()).all()
+    low_stock_items = [
+        {
+            "id": i.id,
+            "name": i.name,
+            "category": i.category,
+            "quantity": i.quantity,
+            "unit": i.unit,
+            "min_required": i.min_required,
+            "location_station": i.location_station
+        }
+        for i in all_inventory if i.quantity <= i.min_required
+    ]
+
+    # 5. Active SOS & Emergency Alerts
     latest_alerts_query = db.query(models.Alert).order_by(models.Alert.created_at.desc()).limit(5).all()
     latest_alerts = [
         {
@@ -1374,19 +2056,33 @@ async def get_dashboard_summary(current_user: models.User = Depends(get_current_
         }
         for a in latest_alerts_query
     ]
+    active_sos_alerts = [a for a in latest_alerts if a["alert_type"] == "SOS" or a["severity"] in ("CRITICAL", "High", "HIGH")]
+
+    # 6. Overall Aggregated Counts
+    active_expeditions_count = db.query(models.Expedition).filter(models.Expedition.status == "Active").count()
 
     return {
+        "user_role": current_user.role,
+        "user_station": user_station,
         "survival_days": survival_days,
         "temperature_used": exp_temp if not is_weather_estimated else None,
         "is_weather_estimated": is_weather_estimated,
+        "expedition": expedition_info,
+        "active_expedition_name": effective_exp.name if effective_exp else None,
+        "active_station": effective_exp.station_name if effective_exp else user_station,
+        "team_size": effective_exp.target_team_size if effective_exp else len(all_users),
         "active_expeditions": active_expeditions_count,
         "cargo_in_transit": cargo_in_transit_count,
-        "personnel_on_field": personnel_on_field_count,
-        "low_stock_items": low_stock_count,
-        "team_size": active_exp.target_team_size if active_exp else 0,
-        "active_expedition_name": active_exp.name if active_exp else None,
-        "active_station": active_exp.station_name if active_exp else None,
+        "cargo_delivered": cargo_delivered_count,
+        "cargo_pending": cargo_pending_count,
+        "cargo_summary": cargo_summary_list,
+        "personnel_on_field": personnel_active_count,
+        "team_roster": team_roster[:6],
+        "low_stock_items": low_stock_items,
+        "low_stock_count": len(low_stock_items),
+        "inventory_total_items": len(all_inventory),
         "latest_alerts": latest_alerts,
+        "active_sos_alerts": active_sos_alerts,
         "weather": weather_data
     }
 
@@ -1493,9 +2189,70 @@ PRIORITY_WEIGHTS = {
     "Low": 1
 }
 
+
+def _supply_metadata_for(name: str) -> dict:
+    catalog_item = next((item for item in STANDARD_SUPPLY_CATALOG if item.get("name") == name), None)
+    base = catalog_item or {}
+    lower_name = (name or "").lower()
+
+    if "oxygen" in lower_name:
+        priority = "Critical"; weight = 2.5; volume = 0.04
+    elif "ration" in lower_name or "food" in lower_name or "water" in lower_name:
+        priority = "High"; weight = 1.2; volume = 0.03
+    elif "fuel" in lower_name or "diesel" in lower_name or "propane" in lower_name:
+        priority = "High"; weight = 8.0; volume = 0.08
+    elif "medical" in lower_name or "kit" in lower_name or "surgical" in lower_name:
+        priority = "Critical"; weight = 2.0; volume = 0.03
+    elif "parka" in lower_name or "boot" in lower_name or "goggle" in lower_name:
+        priority = "Medium"; weight = 0.8; volume = 0.02
+    elif "radio" in lower_name or "phone" in lower_name or "gps" in lower_name:
+        priority = "High"; weight = 1.4; volume = 0.02
+    elif "generator" in lower_name or "battery" in lower_name or "solar" in lower_name:
+        priority = "High"; weight = 6.5; volume = 0.09
+    else:
+        priority = "Medium"; weight = 1.0; volume = 0.02
+
+    return {
+        "supply_name": name,
+        "category": base.get("category", "General"),
+        "unit": base.get("unit", "Units"),
+        "weight_per_unit": float(base.get("weight_kg_per_unit", weight)),
+        "volume_per_unit": float(base.get("volume_m3_per_unit", volume)),
+        "priority": base.get("priority", priority),
+        "priority_value": int(base.get("priority_value", PRIORITY_WEIGHTS.get(priority, 1))),
+    }
+
+
+def _requirement_cargo_rows(db: Session, expedition_id: Optional[int] = None):
+    query = db.query(models.ExpeditionRequirement)
+    if expedition_id is not None:
+        query = query.filter(models.ExpeditionRequirement.expedition_id == expedition_id)
+    rows = query.order_by(models.ExpeditionRequirement.id.asc()).all()
+
+    cargo_items = []
+    for row in rows:
+        meta = _supply_metadata_for(row.supply_name)
+        selected_quantity = max(0, int(row.quantity))
+        cargo_items.append({
+            "id": row.id,
+            "expedition_id": row.expedition_id,
+            "supply_name": row.supply_name,
+            "quantity": selected_quantity,
+            "unit": row.unit,
+            "weight_per_unit": meta["weight_per_unit"],
+            "volume_per_unit": meta["volume_per_unit"],
+            "priority": meta["priority"],
+            "priority_value": meta["priority_value"],
+            "category": meta["category"],
+        })
+    return cargo_items
+
+
 class OptimizeCargoRequest(BaseModel):
+    expedition_id: Optional[int] = None
     capacity_weight_kg: float
     capacity_volume_m3: float
+
 
 @app.post("/cargo/optimize")
 def optimize_cargo_loading(
@@ -1503,9 +2260,23 @@ def optimize_cargo_loading(
     current_user: models.User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
-    cargo_items = db.query(models.CargoShipment).filter(
-        models.CargoShipment.status.in_(["Pending", "Packed"])
-    ).all()
+    cargo_items = _requirement_cargo_rows(db, req.expedition_id)
+    if not cargo_items:
+        cargo_items = db.query(models.CargoShipment).filter(
+            models.CargoShipment.status.in_(["Pending", "Packed"])
+        ).all()
+        cargo_items = [{
+            "id": item.id,
+            "expedition_id": item.expedition_id,
+            "supply_name": item.title,
+            "quantity": 1,
+            "unit": "Units",
+            "weight_per_unit": float(item.weight_kg),
+            "volume_per_unit": float(item.volume_m3),
+            "priority": item.priority,
+            "priority_value": PRIORITY_WEIGHTS.get(item.priority, 1),
+            "category": "Cargo",
+        } for item in cargo_items]
 
     if not cargo_items:
         return {
@@ -1518,10 +2289,12 @@ def optimize_cargo_loading(
             "capacity_volume_m3": req.capacity_volume_m3,
             "weight_utilization_percent": 0.0,
             "volume_utilization_percent": 0.0,
-            "total_priority_value": 0
+            "total_priority_value": 0,
+            "selected_item_count": 0,
+            "remaining_weight_kg": float(req.capacity_weight_kg),
+            "remaining_volume_m3": float(req.capacity_volume_m3),
         }
 
-    # Build OR-Tools CP-SAT Knapsack Model (2 Constraints: Weight + Volume)
     model = cp_model.CpModel()
     SCALE = 100
     weight_cap = int(round(req.capacity_weight_kg * SCALE))
@@ -1529,16 +2302,11 @@ def optimize_cargo_loading(
 
     x = {}
     for i, item in enumerate(cargo_items):
-        x[i] = model.NewBoolVar(f"x_{i}")
+        x[i] = model.NewIntVar(0, int(item["quantity"]), f"x_{i}")
 
-    # Constraint 1: Weight limit
-    model.Add(sum(int(round(item.weight_kg * SCALE)) * x[i] for i, item in enumerate(cargo_items)) <= weight_cap)
-
-    # Constraint 2: Volume limit
-    model.Add(sum(int(round(item.volume_m3 * SCALE)) * x[i] for i, item in enumerate(cargo_items)) <= vol_cap)
-
-    # Objective: Maximize total priority value
-    model.Maximize(sum(PRIORITY_WEIGHTS.get(item.priority, 1) * x[i] for i, item in enumerate(cargo_items)))
+    model.Add(sum(int(round(item["weight_per_unit"] * SCALE)) * x[i] for i, item in enumerate(cargo_items)) <= weight_cap)
+    model.Add(sum(int(round(item["volume_per_unit"] * SCALE)) * x[i] for i, item in enumerate(cargo_items)) <= vol_cap)
+    model.Maximize(sum(item["priority_value"] * x[i] for i, item in enumerate(cargo_items)))
 
     solver = cp_model.CpSolver()
     solver.parameters.max_time_in_seconds = 5.0
@@ -1549,39 +2317,48 @@ def optimize_cargo_loading(
     total_weight = 0.0
     total_volume = 0.0
     total_priority = 0
+    selected_item_count = 0
 
     for i, item in enumerate(cargo_items):
+        selected_qty = int(solver.Value(x[i])) if sol_status in (cp_model.OPTIMAL, cp_model.FEASIBLE) else 0
         item_dict = {
-            "id": item.id,
-            "shipment_code": item.shipment_code,
-            "title": item.title,
-            "weight_kg": item.weight_kg,
-            "volume_m3": item.volume_m3,
-            "priority": item.priority,
-            "priority_value": PRIORITY_WEIGHTS.get(item.priority, 1),
-            "status": item.status
+            "id": item["id"],
+            "expedition_id": item["expedition_id"],
+            "supply_name": item["supply_name"],
+            "quantity": item["quantity"],
+            "selected_quantity": selected_qty,
+            "unit": item["unit"],
+            "weight_per_unit": item["weight_per_unit"],
+            "volume_per_unit": item["volume_per_unit"],
+            "priority": item["priority"],
+            "priority_value": item["priority_value"],
+            "category": item["category"],
+            "total_weight_kg": round(selected_qty * item["weight_per_unit"], 2),
+            "total_volume_m3": round(selected_qty * item["volume_per_unit"], 2),
         }
-        if sol_status in (cp_model.OPTIMAL, cp_model.FEASIBLE) and solver.Value(x[i]) == 1:
+        if selected_qty > 0:
             packed_items.append(item_dict)
-            total_weight += item.weight_kg
-            total_volume += item.volume_m3
-            total_priority += PRIORITY_WEIGHTS.get(item.priority, 1)
+            total_weight += selected_qty * item["weight_per_unit"]
+            total_volume += selected_qty * item["volume_per_unit"]
+            total_priority += selected_qty * item["priority_value"]
+            selected_item_count += selected_qty
         else:
             left_behind_items.append(item_dict)
 
     weight_util = round((total_weight / req.capacity_weight_kg * 100.0), 1) if req.capacity_weight_kg > 0 else 0.0
     vol_util = round((total_volume / req.capacity_volume_m3 * 100.0), 1) if req.capacity_volume_m3 > 0 else 0.0
 
-    # Log to Hash Chain
     last_log = db.query(AuditLog).order_by(AuditLog.id.desc()).first()
     prev_hash = last_log.hash if last_log else ("0" * 64)
     now_dt = datetime.now(timezone.utc)
     payload_dict = {
+        "expedition_id": req.expedition_id,
         "capacity_weight_kg": req.capacity_weight_kg,
         "capacity_volume_m3": req.capacity_volume_m3,
         "packed_count": len(packed_items),
         "left_behind_count": len(left_behind_items),
-        "total_priority_value": total_priority
+        "selected_item_count": selected_item_count,
+        "total_priority_value": total_priority,
     }
     new_hash = AuditLog.compute_hash("CARGO_OPTIMIZED", current_user.username, "CARGO_OPTIMIZER", payload_dict, now_dt, prev_hash)
     audit_entry = AuditLog(
@@ -1591,7 +2368,7 @@ def optimize_cargo_loading(
         payload=AuditLog.serialize_payload(payload_dict),
         timestamp=now_dt,
         prev_hash=prev_hash,
-        hash=new_hash
+        hash=new_hash,
     )
     db.add(audit_entry)
     db.commit()
@@ -1606,8 +2383,156 @@ def optimize_cargo_loading(
         "capacity_volume_m3": req.capacity_volume_m3,
         "weight_utilization_percent": min(100.0, weight_util),
         "volume_utilization_percent": min(100.0, vol_util),
-        "total_priority_value": total_priority
+        "total_priority_value": total_priority,
+        "selected_item_count": selected_item_count,
+        "remaining_weight_kg": round(max(0.0, req.capacity_weight_kg - total_weight), 2),
+        "remaining_volume_m3": round(max(0.0, req.capacity_volume_m3 - total_volume), 2),
     }
+
+
+@app.post("/cargo-manifests")
+def create_cargo_manifest(
+    req: CreateCargoManifestRequest,
+    current_user: models.User = Depends(require_write_role),
+    db: Session = Depends(get_db),
+):
+    expedition = db.query(models.Expedition).filter(models.Expedition.id == req.expedition_id).first()
+    if not expedition:
+        raise HTTPException(status_code=404, detail="Expedition not found")
+
+    items = [item.model_dump() if hasattr(item, "model_dump") else item.dict() for item in req.items]
+    if not items:
+        raise HTTPException(status_code=400, detail="Manifest requires at least one cargo item")
+
+    total_weight = round(sum((item.get("selected_quantity", 0) or item.get("quantity", 0)) * float(item.get("weight_per_unit", 0)) for item in items), 2)
+    total_volume = round(sum((item.get("selected_quantity", 0) or item.get("quantity", 0)) * float(item.get("volume_per_unit", 0)) for item in items), 2)
+    selected_item_count = sum(int(item.get("selected_quantity", 0) or item.get("quantity", 0)) for item in items)
+    total_priority_value = sum(int(item.get("priority_value", 0)) * int(item.get("selected_quantity", 0) or item.get("quantity", 0)) for item in items)
+
+    manifest = models.CargoManifest(
+        expedition_id=req.expedition_id,
+        shipment_code=req.shipment_code,
+        title=req.title,
+        status=req.status,
+        vehicle_capacity_weight_kg=req.vehicle_capacity_weight_kg,
+        vehicle_capacity_volume_m3=req.vehicle_capacity_volume_m3,
+        total_weight_kg=total_weight,
+        total_volume_m3=total_volume,
+        selected_item_count=selected_item_count,
+        total_priority_value=total_priority_value,
+        items_json=items,
+        created_by_user_id=current_user.id,
+    )
+    db.add(manifest)
+    db.commit()
+    db.refresh(manifest)
+
+    cargo_row = db.query(models.CargoShipment).filter(models.CargoShipment.shipment_code == req.shipment_code).first()
+    if cargo_row is None:
+        cargo_row = models.CargoShipment(
+            shipment_code=req.shipment_code,
+            title=req.title,
+            weight_kg=total_weight,
+            volume_m3=total_volume,
+            priority="High" if total_priority_value >= 100 else "Medium",
+            status="Packed",
+            expedition_id=req.expedition_id,
+        )
+        db.add(cargo_row)
+    else:
+        cargo_row.title = req.title
+        cargo_row.weight_kg = total_weight
+        cargo_row.volume_m3 = total_volume
+        cargo_row.expedition_id = req.expedition_id
+        cargo_row.status = "Packed"
+    db.commit()
+
+    return {
+        "id": manifest.id,
+        "expedition_id": manifest.expedition_id,
+        "shipment_code": manifest.shipment_code,
+        "title": manifest.title,
+        "status": manifest.status,
+        "vehicle_capacity_weight_kg": manifest.vehicle_capacity_weight_kg,
+        "vehicle_capacity_volume_m3": manifest.vehicle_capacity_volume_m3,
+        "total_weight_kg": manifest.total_weight_kg,
+        "total_volume_m3": manifest.total_volume_m3,
+        "selected_item_count": manifest.selected_item_count,
+        "total_priority_value": manifest.total_priority_value,
+        "items": manifest.items_json,
+        "created_by": current_user.username,
+        "created_at": manifest.created_at.isoformat(),
+    }
+
+
+@app.get("/cargo-manifests")
+def get_cargo_manifests(
+    expedition_id: Optional[int] = None,
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    query = db.query(models.CargoManifest)
+    if expedition_id is not None:
+        query = query.filter(models.CargoManifest.expedition_id == expedition_id)
+    else:
+        if current_user.role == "Expedition Leader":
+            query = query.filter(models.CargoManifest.expedition_id.in_([
+                row.id for row in db.query(models.Expedition).filter(models.Expedition.station_name == current_user.station_name).all()
+            ]))
+    manifests = query.order_by(models.CargoManifest.id.desc()).all()
+    return [{
+        "id": manifest.id,
+        "expedition_id": manifest.expedition_id,
+        "shipment_code": manifest.shipment_code,
+        "title": manifest.title,
+        "status": manifest.status,
+        "vehicle_capacity_weight_kg": manifest.vehicle_capacity_weight_kg,
+        "vehicle_capacity_volume_m3": manifest.vehicle_capacity_volume_m3,
+        "total_weight_kg": manifest.total_weight_kg,
+        "total_volume_m3": manifest.total_volume_m3,
+        "selected_item_count": manifest.selected_item_count,
+        "total_priority_value": manifest.total_priority_value,
+        "items": manifest.items_json,
+        "created_at": manifest.created_at.isoformat(),
+    } for manifest in manifests]
+
+
+@app.patch("/cargo-manifests/{manifest_id}/status")
+def update_cargo_manifest_status(
+    manifest_id: int,
+    payload: dict,
+    current_user: models.User = Depends(require_write_role),
+    db: Session = Depends(get_db),
+):
+    manifest = db.query(models.CargoManifest).filter(models.CargoManifest.id == manifest_id).first()
+    if not manifest:
+        raise HTTPException(status_code=404, detail="Cargo manifest not found")
+
+    new_status = str(payload.get("status", manifest.status)).strip()
+    if new_status not in {"Packed", "Cancelled", "Archived", "Draft"}:
+        raise HTTPException(status_code=400, detail="Invalid manifest status")
+
+    manifest.status = new_status
+    db.commit()
+    return {"id": manifest.id, "status": manifest.status}
+
+
+@app.delete("/cargo-manifests/{manifest_id}")
+def delete_cargo_manifest(
+    manifest_id: int,
+    current_user: models.User = Depends(require_write_role),
+    db: Session = Depends(get_db),
+):
+    manifest = db.query(models.CargoManifest).filter(models.CargoManifest.id == manifest_id).first()
+    if not manifest:
+        raise HTTPException(status_code=404, detail="Cargo manifest not found")
+
+    if manifest.status not in {"Draft", "Cancelled"}:
+        raise HTTPException(status_code=400, detail="Only draft or cancelled cargo manifests can be deleted")
+
+    db.delete(manifest)
+    db.commit()
+    return {"deleted": True, "manifest_id": manifest_id}
 
 # --- Hash Chain Audit Ledger Routes ---
 @app.get("/audit")

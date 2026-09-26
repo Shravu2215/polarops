@@ -68,3 +68,11 @@ def require_write_role(user: models.User = Depends(get_current_user)) -> models.
             detail="Forbidden: Team Members cannot perform write or create operations"
         )
     return user
+
+def require_base_admin(user: models.User = Depends(get_current_user)) -> models.User:
+    if user.role != "Base Admin":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Forbidden: Only Base Admin can modify station inventory stock"
+        )
+    return user

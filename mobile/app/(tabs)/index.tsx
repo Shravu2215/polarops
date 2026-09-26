@@ -5,11 +5,12 @@ import {
   StyleSheet,
   ScrollView,
   ActivityIndicator,
+  Modal,
   RefreshControl,
   TouchableOpacity,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { useRouter } from 'expo-router';
+import { useFocusEffect, useRouter } from 'expo-router';
 import { MaterialIcons } from '@expo/vector-icons';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import Header from '../../components/Header';
@@ -41,17 +42,129 @@ interface WeatherData {
   fetched_at?: string;
 }
 
+interface AssignedMember {
+  id: number;
+  username: string;
+  role: string;
+  status: string;
+  last_seen: string | null;
+}
+
+interface ExpeditionDetails {
+  id: number;
+  name: string;
+  station_name: string;
+  latitude?: number;
+  longitude?: number;
+  start_date: string | null;
+  end_date: string | null;
+  days_remaining: number | null;
+  target_team_size: number;
+  assigned_members_count: number;
+  assigned_members: AssignedMember[];
+  status: string;
+}
+
+interface ExpeditionListItem {
+  id: number;
+  name: string;
+  station_name: string;
+  start_date: string;
+  end_date: string;
+  status: string;
+  target_team_size: number;
+  assigned_members: number[] | null;
+}
+
+interface ExpeditionDetail extends ExpeditionListItem {
+  latitude: number | null;
+  longitude: number | null;
+  departure_deadline: string | null;
+  milestones: Array<{ name: string; duration_days: number }>;
+  schedule: {
+    total_buffer_days: number;
+    at_risk_count: number;
+    scheduled_milestones: Array<{
+      name: string;
+      duration_days: number;
+      latest_start_date: string;
+      latest_finish_date: string;
+      is_at_risk: boolean;
+    }>;
+  } | null;
+  assigned_member_details: Array<{ id: number; username: string; role: string }>;
+  cargo: Array<{
+    id: number;
+    shipment_code: string;
+    title: string;
+    weight_kg: number;
+    volume_m3: number;
+    priority: string;
+    status: string;
+  }>;
+  activity: Array<{
+    id: number;
+    action: string;
+    performed_by: string;
+    timestamp: string;
+    summary: string;
+  }>;
+  created_at: string | null;
+  updated_at: string | null;
+}
+
+interface CargoSummaryItem {
+  id: number;
+  shipment_code: string;
+  title: string;
+  weight_kg: number;
+  volume_m3: number;
+  priority: string;
+  status: string;
+}
+
+interface LowStockItem {
+  id: number;
+  name: string;
+  category: string;
+  quantity: number;
+  unit: string;
+  min_required: number;
+  location_station: string;
+}
+
+interface TeamRosterItem {
+  id: number;
+  username: string;
+  email: string;
+  role: string;
+  station_name: string;
+  status: string;
+  last_location_update: string | null;
+}
+
 interface DashboardSummary {
+  user_role: string;
+  user_station: string;
   survival_days: number | null;
   temperature_used?: number | null;
-  active_expeditions: number;
-  cargo_in_transit: number;
-  personnel_on_field: number;
-  low_stock_items: number;
-  team_size: number;
+  is_weather_estimated?: boolean;
+  expedition: ExpeditionDetails | null;
   active_expedition_name: string | null;
   active_station: string | null;
+  team_size: number;
+  active_expeditions: number;
+  cargo_in_transit: number;
+  cargo_delivered: number;
+  cargo_pending: number;
+  cargo_summary: CargoSummaryItem[];
+  personnel_on_field: number;
+  team_roster: TeamRosterItem[];
+  low_stock_items: LowStockItem[];
+  low_stock_count: number;
+  inventory_total_items: number;
   latest_alerts: AlertItem[];
+  active_sos_alerts: AlertItem[];
   weather: WeatherData | null;
 }
 
@@ -60,8 +173,16 @@ const STORAGE_KEY = '@polarops_dashboard_summary';
 export default function HomeScreen() {
   const router = useRouter();
   const { token, user } = useApp();
+  const isLeader = user?.role === 'Expedition Leader';
   const isTeamMember = user?.role === 'Team Member';
+  const isOfficer = user?.role === 'Logistics Officer';
+  const isBaseAdmin = user?.role === 'Base Admin';
   const [data, setData] = useState<DashboardSummary | null>(null);
+  const [expeditions, setExpeditions] = useState<ExpeditionListItem[] | null>(null);
+  const [selectedExpeditionId, setSelectedExpeditionId] = useState<number | null>(null);
+  const [expeditionDetail, setExpeditionDetail] = useState<ExpeditionDetail | null>(null);
+  const [loadingExpeditionDetail, setLoadingExpeditionDetail] = useState<boolean>(false);
+  const [expeditionDetailError, setExpeditionDetailError] = useState<string | null>(null);
   const [loading, setLoading] = useState<boolean>(true);
   const [refreshing, setRefreshing] = useState<boolean>(false);
   const [isOfflineData, setIsOfflineData] = useState<boolean>(false);
@@ -94,15 +215,25 @@ export default function HomeScreen() {
         setIsOfflineData(true);
       } else {
         setData({
+          user_role: user?.role || 'Team Member',
+          user_station: user?.station_name || 'Maitri',
           survival_days: null,
+          expedition: null,
           active_expeditions: 0,
           cargo_in_transit: 0,
+          cargo_delivered: 0,
+          cargo_pending: 0,
+          cargo_summary: [],
           personnel_on_field: 0,
-          low_stock_items: 0,
-          team_size: 0,
           active_expedition_name: null,
           active_station: null,
+          team_size: 0,
+          team_roster: [],
+          low_stock_items: [],
+          low_stock_count: 0,
+          inventory_total_items: 0,
           latest_alerts: [],
+          active_sos_alerts: [],
           weather: null,
         });
         setIsOfflineData(true);
@@ -116,6 +247,66 @@ export default function HomeScreen() {
   useEffect(() => {
     fetchDashboardData();
   }, [token]);
+
+  useFocusEffect(
+    React.useCallback(() => {
+      let isFocused = true;
+      setExpeditions(null);
+
+      const loadExpeditions = async () => {
+        if (!token) {
+          return;
+        }
+
+        try {
+          const response = await fetch(`${BACKEND_URL}/expeditions`, {
+            headers: { Authorization: `Bearer ${token}` },
+          });
+          if (!response.ok) {
+            throw new Error(`HTTP error ${response.status}`);
+          }
+          const result: ExpeditionListItem[] = await response.json();
+          if (isFocused) {
+            setExpeditions(result);
+          }
+        } catch (err) {
+          console.log('Failed to fetch expeditions:', err);
+        }
+      };
+
+      void loadExpeditions();
+      return () => {
+        isFocused = false;
+      };
+    }, [token])
+  );
+
+  const openExpeditionDetails = async (expeditionId: number) => {
+    setSelectedExpeditionId(expeditionId);
+    setExpeditionDetail(null);
+    setExpeditionDetailError(null);
+    setLoadingExpeditionDetail(true);
+
+    try {
+      const response = await fetch(`${BACKEND_URL}/expeditions/${expeditionId}`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (!response.ok) {
+        throw new Error(`HTTP error ${response.status}`);
+      }
+      setExpeditionDetail(await response.json());
+    } catch (err) {
+      setExpeditionDetailError(err instanceof Error ? err.message : 'Unable to load expedition details.');
+    } finally {
+      setLoadingExpeditionDetail(false);
+    }
+  };
+
+  const closeExpeditionDetails = () => {
+    setSelectedExpeditionId(null);
+    setExpeditionDetail(null);
+    setExpeditionDetailError(null);
+  };
 
   const onRefresh = () => {
     setRefreshing(true);
@@ -161,190 +352,500 @@ export default function HomeScreen() {
           />
         }
       >
-        {/* Offline Note Banner if using cached data */}
+        {/* Offline Note Banner */}
         {isOfflineData ? (
           <View style={styles.offlineNoteCard}>
             <MaterialIcons name="cloud-off" size={16} color={colors.secondaryText} />
             <Text style={styles.offlineNoteText}>
-              Offline, showing last data
+              Offline mode, displaying cached backend telemetry
             </Text>
           </View>
         ) : null}
 
-        {/* Personal Check-In & Role Banner for Team Member */}
-        {isTeamMember ? (
+        {/* Top Role Header Banner */}
+        <View style={{
+          backgroundColor: colors.card,
+          borderRadius: radius.card,
+          borderWidth: 1,
+          borderColor: colors.cardBorder,
+          padding: spacing.md,
+          flexDirection: 'row',
+          alignItems: 'center',
+          gap: spacing.md,
+        }}>
           <View style={{
-            backgroundColor: colors.card,
-            borderRadius: radius.card,
-            borderWidth: 1,
-            borderColor: colors.cardBorder,
-            padding: spacing.md,
-            flexDirection: 'row',
+            width: 44,
+            height: 44,
+            borderRadius: 22,
+            backgroundColor: isLeader ? colors.primaryIce : isOfficer ? '#FFF7ED' : isBaseAdmin ? '#FEF3C7' : '#F0FDF4',
             alignItems: 'center',
-            gap: spacing.md,
+            justifyContent: 'center',
           }}>
-            <View style={{
-              width: 44,
-              height: 44,
-              borderRadius: 22,
-              backgroundColor: colors.primaryIce,
-              alignItems: 'center',
-              justifyContent: 'center',
-            }}>
-              <MaterialIcons name="my-location" size={24} color={colors.primary} />
-            </View>
-            <View style={{ flex: 1 }}>
-              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
-                <Text style={{ fontFamily: typography.fontFamily.bold, fontSize: 14, color: colors.text }}>
-                  {user?.username || 'Team Member'}
-                </Text>
-                <View style={{ backgroundColor: colors.okGreen + '20', paddingHorizontal: 6, paddingVertical: 1, borderRadius: 8 }}>
-                  <Text style={{ fontFamily: typography.fontFamily.bold, fontSize: 10, color: colors.okGreen }}>Check-In Active</Text>
-                </View>
-              </View>
-              <Text style={{ fontFamily: typography.fontFamily.regular, fontSize: 12, color: colors.secondaryText, marginTop: 2 }}>
-                Station: {user?.station_name || 'Maitri'} • GPS Location Reporting Active
-              </Text>
-            </View>
+            <MaterialIcons
+              name={isLeader ? 'flag' : isOfficer ? 'local-shipping' : isBaseAdmin ? 'inventory' : 'person'}
+              size={24}
+              color={isLeader ? colors.primary : isOfficer ? colors.accentOrange : isBaseAdmin ? '#D97706' : colors.okGreen}
+            />
           </View>
-        ) : null}
-
-        {/* Hero Card: Survival Days Left */}
-        {data?.survival_days !== null && data?.survival_days !== undefined ? (
-          <View style={styles.heroCard}>
-            <View style={styles.heroHeader}>
-              <View>
-                <Text style={styles.heroSubTitle}>
-                  {data.active_expedition_name || 'Active Expedition'}
-                </Text>
-                <Text style={styles.heroTitle}>Survival Days Left</Text>
-                <Text style={styles.heroSubText}>Based on current stock and daily team usage</Text>
-              </View>
-
-              <View style={styles.stationBadge}>
-                <Text style={styles.stationBadgeText}>
-                  {data.active_station || 'Maitri'} Station
+          <View style={{ flex: 1 }}>
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+              <Text style={{ fontFamily: typography.fontFamily.bold, fontSize: 14, color: colors.text }}>
+                {user?.username || 'Polar Station User'}
+              </Text>
+              <View style={{
+                backgroundColor: isLeader ? colors.primaryIce : isOfficer ? '#FFF7ED' : isBaseAdmin ? '#FEF3C7' : '#F0FDF4',
+                paddingHorizontal: 8,
+                paddingVertical: 2,
+                borderRadius: radius.pill,
+                borderWidth: 1,
+                borderColor: colors.cardBorder
+              }}>
+                <Text style={{
+                  fontFamily: typography.fontFamily.bold,
+                  fontSize: 10,
+                  color: isLeader ? colors.primary : isOfficer ? colors.accentOrange : isBaseAdmin ? '#B45309' : colors.okGreen
+                }}>
+                  {user?.role || 'Team Member'}
                 </Text>
               </View>
             </View>
+            <Text style={{ fontFamily: typography.fontFamily.regular, fontSize: 11, color: colors.secondaryText, marginTop: 2 }}>
+              Station: {data?.user_station || user?.station_name || 'Maitri'} • Real-Time Shared Operations
+            </Text>
+          </View>
+        </View>
 
-            <View style={styles.heroBody}>
-              <View style={styles.counterContainer}>
-                <Text style={styles.survivalValue}>
-                  {data.survival_days}{' '}
-                  <Text style={styles.unitText}>Days</Text>
-                </Text>
-
-                <View style={styles.statusIndicatorRow}>
-                  <View style={[styles.statusDot, { backgroundColor: colors.okGreen }]} />
-                  <Text style={styles.statusText}>
-                    Stock Operational ({data.team_size} Team Members)
+        {/* ------------------------------------------------------------------ */}
+        {/* ROLE 1: EXPEDITION LEADER DASHBOARD                                */}
+        {/* ------------------------------------------------------------------ */}
+        {isLeader && (
+          <>
+            {/* Active Expedition Hero */}
+            <View style={styles.heroCard}>
+              <View style={styles.heroHeader}>
+                <View>
+                  <Text style={styles.heroSubTitle}>
+                    {data?.expedition?.name || 'Active Expedition Command'}
+                  </Text>
+                  <Text style={styles.heroTitle}>
+                    {data?.survival_days !== null && data?.survival_days !== undefined
+                      ? `${data.survival_days} Days Survival Reserve`
+                      : 'Expedition Field Operations'}
+                  </Text>
+                  <Text style={styles.heroSubText}>
+                    {data?.expedition?.end_date
+                      ? `Ends: ${data.expedition.end_date} (${data.expedition.days_remaining} days remaining)`
+                      : 'Active expedition timeline in progress'}
                   </Text>
                 </View>
 
-                {data.temperature_used !== undefined && data.temperature_used !== null ? (
-                  <Text style={styles.tempSubText}>
-                    Calculated at {data.temperature_used}°C station weather
+                <View style={styles.stationBadge}>
+                  <Text style={styles.stationBadgeText}>
+                    {data?.active_station || 'Maitri'} Station
                   </Text>
-                ) : null}
+                </View>
               </View>
 
-              <View style={styles.ringContainer}>
-                <View style={styles.outerRing}>
-                  <View style={styles.innerRing}>
-                    <MaterialIcons name="shield" size={26} color={colors.primary} />
+              <View style={styles.heroBody}>
+                <View style={styles.counterContainer}>
+                  <View style={styles.statusIndicatorRow}>
+                    <View style={[styles.statusDot, { backgroundColor: colors.okGreen }]} />
+                    <Text style={styles.statusText}>
+                      Team Size: {data?.expedition?.assigned_members_count || data?.team_size || 0} Assigned Members
+                    </Text>
+                  </View>
+                  {data?.temperature_used !== undefined && data?.temperature_used !== null ? (
+                    <Text style={styles.tempSubText}>
+                      Calculated at {data.temperature_used}°C live station weather
+                    </Text>
+                  ) : null}
+                </View>
+              </View>
+            </View>
+
+            {/* Operational Summary Grid */}
+            <Text style={styles.sectionHeader}>Leader Operational Summary</Text>
+            <View style={styles.statsGrid}>
+              <View style={styles.statCard}>
+                <MaterialIcons name="flag" size={22} color={colors.primary} />
+                <Text style={styles.statValue}>{data?.active_expeditions ?? 0}</Text>
+                <Text style={styles.statLabel}>Active Expeditions</Text>
+              </View>
+              <View style={styles.statCard}>
+                <MaterialIcons name="people" size={22} color={colors.okGreen} />
+                <Text style={styles.statValue}>{data?.personnel_on_field ?? 0}</Text>
+                <Text style={styles.statLabel}>Active Field Members</Text>
+              </View>
+              <View style={styles.statCard}>
+                <MaterialIcons name="local-shipping" size={22} color={colors.accentOrange} />
+                <Text style={styles.statValue}>{data?.cargo_in_transit ?? 0}</Text>
+                <Text style={styles.statLabel}>Cargo In-Transit</Text>
+              </View>
+              <View style={styles.statCard}>
+                <MaterialIcons name="warning" size={22} color={colors.dangerRed} />
+                <Text style={styles.statValue}>{data?.low_stock_count ?? 0}</Text>
+                <Text style={styles.statLabel}>Low Stock Alerts</Text>
+              </View>
+            </View>
+
+            {/* Assigned Team Members & Status */}
+            <Text style={styles.sectionHeader}>Assigned Team Roster & Field Status</Text>
+            <View style={{ gap: spacing.xs }}>
+              {(data?.expedition?.assigned_members && data.expedition.assigned_members.length > 0
+                ? data.expedition.assigned_members
+                : data?.team_roster || []
+              ).map((member) => (
+                <View key={member.id} style={{
+                  backgroundColor: colors.card,
+                  borderRadius: radius.default,
+                  borderWidth: 1,
+                  borderColor: colors.cardBorder,
+                  padding: spacing.xs + 2,
+                  flexDirection: 'row',
+                  alignItems: 'center',
+                  justifyContent: 'space-between',
+                }}>
+                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+                    <MaterialIcons name="account-circle" size={24} color={colors.primary} />
+                    <View>
+                      <Text style={{ fontFamily: typography.fontFamily.bold, fontSize: 13, color: colors.text }}>
+                        {member.username}
+                      </Text>
+                      <Text style={{ fontFamily: typography.fontFamily.regular, fontSize: 11, color: colors.secondaryText }}>
+                        {member.role}
+                      </Text>
+                    </View>
+                  </View>
+                  <View style={{
+                    backgroundColor: member.status.includes('Online') ? '#DCFCE7' : '#F1F5F9',
+                    paddingHorizontal: 8,
+                    paddingVertical: 2,
+                    borderRadius: radius.pill,
+                  }}>
+                    <Text style={{
+                      fontFamily: typography.fontFamily.bold,
+                      fontSize: 10,
+                      color: member.status.includes('Online') ? '#15803D' : colors.secondaryText,
+                    }}>
+                      {member.status}
+                    </Text>
                   </View>
                 </View>
-              </View>
+              ))}
             </View>
-          </View>
-        ) : (
-          <View style={styles.emptyCard}>
-            <MaterialIcons name="event-busy" size={36} color={colors.secondaryText} />
-            <Text style={styles.emptyTitle}>
-              {isTeamMember ? 'No Active Expedition Configured' : 'No Active Expedition'}
-            </Text>
-            <Text style={styles.emptySub}>
-              {isTeamMember
-                ? 'Expedition planning is managed by station leadership. You can view station stock & team status below.'
-                : 'Create an expedition to compute survival days & live station metrics.'}
-            </Text>
-            {isTeamMember ? (
-              <View style={{ flexDirection: 'row', gap: spacing.sm, marginTop: spacing.xs }}>
-                <TouchableOpacity
-                  style={styles.emptyActionButton}
-                  onPress={() => router.push('/inventory')}
-                >
-                  <Text style={styles.emptyActionText}>View Inventory</Text>
-                </TouchableOpacity>
-                <TouchableOpacity
-                  style={[styles.emptyActionButton, { backgroundColor: colors.chipBackground }]}
-                  onPress={() => router.push('/team')}
-                >
-                  <Text style={[styles.emptyActionText, { color: colors.text }]}>View Team</Text>
-                </TouchableOpacity>
-              </View>
-            ) : (
-              <TouchableOpacity
-                style={styles.emptyActionButton}
-                onPress={() => router.push('/more')}
-              >
-                <Text style={styles.emptyActionText}>Create Expedition</Text>
-              </TouchableOpacity>
-            )}
-          </View>
+          </>
         )}
 
-        {/* Stat Cards */}
-        <Text style={styles.sectionHeader}>Station Operational Metrics</Text>
-        {isTeamMember ? (
-          <View style={styles.statsGrid}>
-            <View style={styles.statCard}>
-              <MaterialIcons name="people" size={22} color={colors.okGreen} />
-              <Text style={styles.statValue}>{data?.personnel_on_field ?? 0}</Text>
-              <Text style={styles.statLabel}>Team Currently Active</Text>
-              <Text style={styles.statSubLabel}>Checked in within last 10 minutes</Text>
+        {/* ------------------------------------------------------------------ */}
+        {/* ROLE 2: LOGISTICS OFFICER DASHBOARD                                */}
+        {/* ------------------------------------------------------------------ */}
+        {isOfficer && (
+          <>
+            <View style={[styles.heroCard, { backgroundColor: '#FFF7ED', borderColor: colors.accentOrange }]}>
+              <View style={styles.heroHeader}>
+                <View>
+                  <Text style={[styles.heroSubTitle, { color: colors.accentOrange }]}>
+                    Station Cargo & Logistics Operations
+                  </Text>
+                  <Text style={[styles.heroTitle, { color: colors.text }]}>
+                    {data?.cargo_in_transit} Shipments In-Transit
+                  </Text>
+                  <Text style={styles.heroSubText}>
+                    Active Station: {data?.active_station || 'Maitri'}
+                  </Text>
+                </View>
+                <MaterialIcons name="local-shipping" size={36} color={colors.accentOrange} />
+              </View>
             </View>
 
-            <View style={styles.statCard}>
-              <MaterialIcons name="warning" size={22} color={colors.dangerRed} />
-              <Text style={styles.statValue}>{data?.latest_alerts?.length ?? 0}</Text>
-              <Text style={styles.statLabel}>Active Alerts</Text>
-              <Text style={styles.statSubLabel}>Current station warnings</Text>
-            </View>
-          </View>
-        ) : (
-          <View style={styles.statsGrid}>
-            <View style={styles.statCard}>
-              <MaterialIcons name="flag" size={22} color={colors.primary} />
-              <Text style={styles.statValue}>{data?.active_expeditions ?? 0}</Text>
-              <Text style={styles.statLabel}>Active Expeditions</Text>
-            </View>
-
-            <View style={styles.statCard}>
-              <MaterialIcons name="local-shipping" size={22} color={colors.accentOrange} />
-              <Text style={styles.statValue}>{data?.cargo_in_transit ?? 0}</Text>
-              <Text style={styles.statLabel}>Cargo In-Transit</Text>
-            </View>
-
-            <View style={styles.statCard}>
-              <MaterialIcons name="people" size={22} color={colors.okGreen} />
-              <Text style={styles.statValue}>{data?.personnel_on_field ?? 0}</Text>
-              <Text style={styles.statLabel}>Team Currently Active</Text>
-              <Text style={styles.statSubLabel}>Checked in within last 10 minutes</Text>
+            <Text style={styles.sectionHeader}>Logistics Overview</Text>
+            <View style={styles.statsGrid}>
+              <View style={styles.statCard}>
+                <MaterialIcons name="schedule" size={22} color={colors.accentOrange} />
+                <Text style={styles.statValue}>{data?.cargo_pending ?? 0}</Text>
+                <Text style={styles.statLabel}>Pending Orders</Text>
+              </View>
+              <View style={styles.statCard}>
+                <MaterialIcons name="local-shipping" size={22} color={colors.primary} />
+                <Text style={styles.statValue}>{data?.cargo_in_transit ?? 0}</Text>
+                <Text style={styles.statLabel}>In-Transit</Text>
+              </View>
+              <View style={styles.statCard}>
+                <MaterialIcons name="check-circle" size={22} color={colors.okGreen} />
+                <Text style={styles.statValue}>{data?.cargo_delivered ?? 0}</Text>
+                <Text style={styles.statLabel}>Delivered</Text>
+              </View>
+              <View style={styles.statCard}>
+                <MaterialIcons name="people" size={22} color={colors.secondaryText} />
+                <Text style={styles.statValue}>{data?.personnel_on_field ?? 0}</Text>
+                <Text style={styles.statLabel}>Field Personnel</Text>
+              </View>
             </View>
 
-            <View style={styles.statCard}>
-              <MaterialIcons name="warning" size={22} color={colors.dangerRed} />
-              <Text style={styles.statValue}>{data?.low_stock_items ?? 0}</Text>
-              <Text style={styles.statLabel}>Low Stock Items</Text>
+            <Text style={styles.sectionHeader}>Active Shipments Ledger</Text>
+            <View style={{ gap: spacing.xs }}>
+              {(data?.cargo_summary && data.cargo_summary.length > 0) ? (
+                data.cargo_summary.map((cargo) => (
+                  <View key={cargo.id} style={{
+                    backgroundColor: colors.card,
+                    borderRadius: radius.default,
+                    borderWidth: 1,
+                    borderColor: colors.cardBorder,
+                    padding: spacing.xs + 2,
+                    flexDirection: 'row',
+                    alignItems: 'center',
+                    justifyContent: 'space-between',
+                  }}>
+                    <View>
+                      <Text style={{ fontFamily: typography.fontFamily.bold, fontSize: 13, color: colors.text }}>
+                        {cargo.title} (#{cargo.shipment_code})
+                      </Text>
+                      <Text style={{ fontFamily: typography.fontFamily.regular, fontSize: 11, color: colors.secondaryText }}>
+                        Weight: {cargo.weight_kg}kg • Vol: {cargo.volume_m3}m³ • Priority: {cargo.priority}
+                      </Text>
+                    </View>
+                    <View style={{
+                      backgroundColor: cargo.status === 'In-Transit' ? '#FEF3C7' : cargo.status === 'Delivered' ? '#DCFCE7' : '#F1F5F9',
+                      paddingHorizontal: 8,
+                      paddingVertical: 2,
+                      borderRadius: radius.pill,
+                    }}>
+                      <Text style={{
+                        fontFamily: typography.fontFamily.bold,
+                        fontSize: 10,
+                        color: cargo.status === 'In-Transit' ? '#B45309' : cargo.status === 'Delivered' ? '#15803D' : colors.secondaryText,
+                      }}>
+                        {cargo.status}
+                      </Text>
+                    </View>
+                  </View>
+                ))
+              ) : (
+                <View style={styles.emptyAlertsCard}>
+                  <Text style={styles.emptyAlertsText}>No cargo shipments registered yet.</Text>
+                </View>
+              )}
             </View>
-          </View>
+          </>
         )}
 
-        {/* Weather Card */}
+        {/* ------------------------------------------------------------------ */}
+        {/* ROLE 3: BASE ADMIN DASHBOARD                                       */}
+        {/* ------------------------------------------------------------------ */}
+        {isBaseAdmin && (
+          <>
+            <View style={[styles.heroCard, { backgroundColor: '#FEF3C7', borderColor: '#D97706' }]}>
+              <View style={styles.heroHeader}>
+                <View>
+                  <Text style={[styles.heroSubTitle, { color: '#B45309' }]}>
+                    Base Station Inventory Management
+                  </Text>
+                  <Text style={[styles.heroTitle, { color: colors.text }]}>
+                    {data?.user_station || 'Maitri'} Station Stock
+                  </Text>
+                  <Text style={styles.heroSubText}>
+                    {data?.low_stock_count} items below minimum alert threshold
+                  </Text>
+                </View>
+                <MaterialIcons name="inventory" size={36} color="#B45309" />
+              </View>
+            </View>
+
+            <Text style={styles.sectionHeader}>Station Stock Summary</Text>
+            <View style={styles.statsGrid}>
+              <View style={styles.statCard}>
+                <MaterialIcons name="category" size={22} color={colors.primary} />
+                <Text style={styles.statValue}>{data?.inventory_total_items ?? 0}</Text>
+                <Text style={styles.statLabel}>Total Stock Supplies</Text>
+              </View>
+              <View style={styles.statCard}>
+                <MaterialIcons name="warning" size={22} color={colors.dangerRed} />
+                <Text style={styles.statValue}>{data?.low_stock_count ?? 0}</Text>
+                <Text style={styles.statLabel}>Low Stock Items</Text>
+              </View>
+              <View style={styles.statCard}>
+                <MaterialIcons name="local-shipping" size={22} color={colors.accentOrange} />
+                <Text style={styles.statValue}>{data?.cargo_delivered ?? 0}</Text>
+                <Text style={styles.statLabel}>Received Shipments</Text>
+              </View>
+              <View style={styles.statCard}>
+                <MaterialIcons name="people" size={22} color={colors.okGreen} />
+                <Text style={styles.statValue}>{data?.personnel_on_field ?? 0}</Text>
+                <Text style={styles.statLabel}>Station Personnel</Text>
+              </View>
+            </View>
+
+            {/* Low Stock Items List */}
+            <Text style={styles.sectionHeader}>Critical Low Stock Items</Text>
+            <View style={{ gap: spacing.xs }}>
+              {(data?.low_stock_items && data.low_stock_items.length > 0) ? (
+                data.low_stock_items.map((item) => (
+                  <View key={item.id} style={{
+                    backgroundColor: colors.card,
+                    borderRadius: radius.default,
+                    borderWidth: 1,
+                    borderColor: colors.dangerRed + '40',
+                    padding: spacing.xs + 2,
+                    flexDirection: 'row',
+                    alignItems: 'center',
+                    justifyContent: 'space-between',
+                  }}>
+                    <View>
+                      <Text style={{ fontFamily: typography.fontFamily.bold, fontSize: 13, color: colors.text }}>
+                        {item.name}
+                      </Text>
+                      <Text style={{ fontFamily: typography.fontFamily.regular, fontSize: 11, color: colors.secondaryText }}>
+                        Category: {item.category} • Station: {item.location_station}
+                      </Text>
+                    </View>
+                    <View style={{ alignItems: 'flex-end' }}>
+                      <Text style={{ fontFamily: typography.fontFamily.bold, fontSize: 13, color: colors.dangerRed }}>
+                        {item.quantity} {item.unit}
+                      </Text>
+                      <Text style={{ fontFamily: typography.fontFamily.regular, fontSize: 10, color: colors.secondaryText }}>
+                        Min: {item.min_required} {item.unit}
+                      </Text>
+                    </View>
+                  </View>
+                ))
+              ) : (
+                <View style={styles.emptyAlertsCard}>
+                  <MaterialIcons name="check-circle-outline" size={24} color={colors.okGreen} />
+                  <Text style={styles.emptyAlertsText}>All inventory items are above minimum thresholds.</Text>
+                </View>
+              )}
+            </View>
+          </>
+        )}
+
+        {/* ------------------------------------------------------------------ */}
+        {/* ROLE 4: TEAM MEMBER DASHBOARD                                     */}
+        {/* ------------------------------------------------------------------ */}
+        {isTeamMember && (
+          <>
+            <View style={[styles.heroCard, { backgroundColor: '#F0FDF4', borderColor: colors.okGreen }]}>
+              <View style={styles.heroHeader}>
+                <View>
+                  <Text style={[styles.heroSubTitle, { color: colors.okGreen }]}>
+                    My Expedition Roster & Check-In
+                  </Text>
+                  <Text style={[styles.heroTitle, { color: colors.text }]}>
+                    {data?.expedition?.name || 'Assigned Expedition'}
+                  </Text>
+                  <Text style={styles.heroSubText}>
+                    Station: {data?.user_station || user?.station_name || 'Maitri'}
+                  </Text>
+                </View>
+                <MaterialIcons name="my-location" size={32} color={colors.okGreen} />
+              </View>
+            </View>
+
+            <Text style={styles.sectionHeader}>My Expedition Status</Text>
+            <View style={styles.statsGrid}>
+              <View style={styles.statCard}>
+                <MaterialIcons name="people" size={22} color={colors.okGreen} />
+                <Text style={styles.statValue}>{data?.expedition?.assigned_members_count || data?.personnel_on_field || 1}</Text>
+                <Text style={styles.statLabel}>Expedition Teammates</Text>
+              </View>
+              <View style={styles.statCard}>
+                <MaterialIcons name="warning" size={22} color={colors.dangerRed} />
+                <Text style={styles.statValue}>{data?.active_sos_alerts?.length ?? 0}</Text>
+                <Text style={styles.statLabel}>Emergency Alerts</Text>
+              </View>
+            </View>
+
+            {/* My Team Members List */}
+            <Text style={styles.sectionHeader}>My Teammates</Text>
+            <View style={{ gap: spacing.xs }}>
+              {(data?.expedition?.assigned_members && data.expedition.assigned_members.length > 0
+                ? data.expedition.assigned_members
+                : data?.team_roster || []
+              ).map((member) => (
+                <View key={member.id} style={{
+                  backgroundColor: colors.card,
+                  borderRadius: radius.default,
+                  borderWidth: 1,
+                  borderColor: colors.cardBorder,
+                  padding: spacing.xs + 2,
+                  flexDirection: 'row',
+                  alignItems: 'center',
+                  justifyContent: 'space-between',
+                }}>
+                  <Text style={{ fontFamily: typography.fontFamily.bold, fontSize: 13, color: colors.text }}>
+                    {member.username} ({member.role})
+                  </Text>
+                  <Text style={{ fontFamily: typography.fontFamily.medium, fontSize: 11, color: colors.okGreen }}>
+                    {member.status}
+                  </Text>
+                </View>
+              ))}
+            </View>
+          </>
+        )}
+
+        {expeditions !== null && (
+          <>
+            <Text style={styles.sectionHeader}>All Expeditions</Text>
+            <View style={{ gap: spacing.xs }}>
+              {expeditions.length > 0 ? expeditions.map((expedition) => {
+                const isCurrentExpedition = data?.expedition?.id === expedition.id;
+                const statusLabel = expedition.status === 'Planning' ? 'Upcoming' : expedition.status;
+                const statusColor = expedition.status === 'Active'
+                  ? colors.okGreen
+                  : expedition.status === 'Completed'
+                    ? colors.secondaryText
+                    : colors.accentOrange;
+
+                return (
+                  <TouchableOpacity
+                    key={expedition.id}
+                    activeOpacity={0.78}
+                    accessibilityRole="button"
+                    accessibilityLabel={`View details for ${expedition.name}`}
+                    onPress={() => { void openExpeditionDetails(expedition.id); }}
+                    style={{
+                    backgroundColor: colors.card,
+                    borderRadius: radius.default,
+                    borderWidth: 1,
+                    borderColor: isCurrentExpedition ? colors.primary : colors.cardBorder,
+                    padding: spacing.md,
+                    flexDirection: 'row',
+                    alignItems: 'center',
+                    gap: spacing.md,
+                  }}>
+                    <View style={{ flex: 1 }}>
+                      <Text style={{ fontFamily: typography.fontFamily.bold, fontSize: 14, color: colors.text }}>
+                        {expedition.name}
+                      </Text>
+                      <Text style={{ fontFamily: typography.fontFamily.regular, fontSize: 11, color: colors.secondaryText, marginTop: 3 }}>
+                        {expedition.station_name} | {expedition.start_date} to {expedition.end_date} | Team: {expedition.target_team_size}
+                      </Text>
+                      {isCurrentExpedition ? (
+                        <Text style={{ fontFamily: typography.fontFamily.bold, fontSize: 10, color: colors.primary, marginTop: 4 }}>
+                          Current expedition
+                        </Text>
+                      ) : null}
+                    </View>
+                    <Text style={{ fontFamily: typography.fontFamily.bold, fontSize: 11, color: statusColor }}>
+                      {statusLabel}
+                    </Text>
+                    <MaterialIcons name="chevron-right" size={22} color={colors.secondaryText} />
+                  </TouchableOpacity>
+                );
+              }) : (
+                <View style={styles.emptyAlertsCard}>
+                  <Text style={styles.emptyAlertsText}>No expeditions registered yet.</Text>
+                </View>
+              )}
+            </View>
+          </>
+        )}
+
+        {/* ------------------------------------------------------------------ */}
+        {/* COMMON SHARED COMPONENTS: WEATHER & SOS ALERTS (ALL ROLES)         */}
+        {/* ------------------------------------------------------------------ */}
         <Text style={styles.sectionHeader}>
-          Polar Weather — {data?.active_station || 'Maitri'}
+          Polar Weather — {data?.active_station || data?.user_station || 'Maitri'}
         </Text>
         {data?.weather ? (
           <View style={styles.weatherCard}>
@@ -385,14 +886,14 @@ export default function HomeScreen() {
           <View style={styles.emptyWeatherCard}>
             <MaterialIcons name="cloud-off" size={24} color={colors.secondaryText} />
             <Text style={styles.emptyWeatherText}>
-              No station weather available. Add an active expedition with station coordinates.
+              Station weather loading from coordinates...
             </Text>
           </View>
         )}
 
-        {/* Latest Alerts List */}
+        {/* Latest & Active SOS Alerts */}
         <View style={styles.sectionHeaderRow}>
-          <Text style={styles.sectionHeader}>Latest Station Alerts</Text>
+          <Text style={styles.sectionHeader}>Emergency & Station Alerts</Text>
           <Text style={styles.alertCountText}>
             {data?.latest_alerts.length ?? 0} active
           </Text>
@@ -441,6 +942,176 @@ export default function HomeScreen() {
           </View>
         )}
       </ScrollView>
+
+      <Modal
+        visible={selectedExpeditionId !== null}
+        transparent
+        animationType="slide"
+        onRequestClose={closeExpeditionDetails}
+      >
+        <View style={{ flex: 1, backgroundColor: 'rgba(10, 20, 30, 0.48)', justifyContent: 'flex-end' }}>
+          <SafeAreaView style={{
+            maxHeight: '92%',
+            backgroundColor: colors.background,
+            borderTopLeftRadius: radius.card,
+            borderTopRightRadius: radius.card,
+            overflow: 'hidden',
+          }}>
+            <View style={{
+              paddingHorizontal: spacing.md,
+              paddingVertical: spacing.sm,
+              flexDirection: 'row',
+              alignItems: 'center',
+              justifyContent: 'space-between',
+              borderBottomWidth: 1,
+              borderBottomColor: colors.cardBorder,
+            }}>
+              <View style={{ flex: 1 }}>
+                <Text style={{ fontFamily: typography.fontFamily.bold, fontSize: 18, color: colors.text }}>
+                  Expedition Details
+                </Text>
+                {selectedExpeditionId !== null ? (
+                  <Text style={{ fontFamily: typography.fontFamily.regular, fontSize: 11, color: colors.secondaryText }}>
+                    Expedition #{selectedExpeditionId}
+                  </Text>
+                ) : null}
+              </View>
+              <TouchableOpacity
+                onPress={closeExpeditionDetails}
+                accessibilityRole="button"
+                accessibilityLabel="Close expedition details"
+                style={{ padding: spacing.xs }}
+              >
+                <MaterialIcons name="close" size={24} color={colors.secondaryText} />
+              </TouchableOpacity>
+            </View>
+
+            {loadingExpeditionDetail ? (
+              <View style={{ padding: spacing.xl, alignItems: 'center', gap: spacing.sm }}>
+                <ActivityIndicator size="large" color={colors.primary} />
+                <Text style={styles.loadingText}>Loading expedition history...</Text>
+              </View>
+            ) : expeditionDetailError ? (
+              <Text style={{ padding: spacing.md, color: colors.dangerRed, fontFamily: typography.fontFamily.medium }}>
+                {expeditionDetailError}
+              </Text>
+            ) : expeditionDetail ? (
+              <ScrollView contentContainerStyle={{ padding: spacing.md, paddingBottom: spacing.xl, gap: spacing.md }}>
+                <View style={{ gap: spacing.xs }}>
+                  <Text style={{ fontFamily: typography.fontFamily.bold, fontSize: 20, color: colors.text }}>
+                    {expeditionDetail.name}
+                  </Text>
+                  <Text style={{ fontFamily: typography.fontFamily.medium, fontSize: 13, color: colors.secondaryText }}>
+                    {expeditionDetail.status === 'Planning' ? 'Upcoming' : expeditionDetail.status} | {expeditionDetail.station_name}
+                  </Text>
+                  <Text style={{ fontFamily: typography.fontFamily.regular, fontSize: 12, color: colors.secondaryText }}>
+                    {expeditionDetail.start_date} to {expeditionDetail.end_date}
+                  </Text>
+                  <Text style={{ fontFamily: typography.fontFamily.regular, fontSize: 12, color: colors.secondaryText }}>
+                    Coordinates: {expeditionDetail.latitude != null && expeditionDetail.longitude != null
+                      ? `${expeditionDetail.latitude.toFixed(3)}, ${expeditionDetail.longitude.toFixed(3)}`
+                      : 'Not recorded'}
+                  </Text>
+                  <Text style={{ fontFamily: typography.fontFamily.regular, fontSize: 12, color: colors.secondaryText }}>
+                    Team size: {expeditionDetail.target_team_size} | Created: {expeditionDetail.created_at || 'Unknown'}
+                  </Text>
+                </View>
+
+                <View style={{ gap: spacing.xs }}>
+                  <Text style={styles.sectionHeader}>Assigned Team</Text>
+                  {expeditionDetail.assigned_member_details.length > 0 ? expeditionDetail.assigned_member_details.map((member) => (
+                    <Text key={member.id} style={{ fontFamily: typography.fontFamily.regular, fontSize: 12, color: colors.text }}>
+                      {member.username} | {member.role}
+                    </Text>
+                  )) : (
+                    <Text style={styles.emptyAlertsText}>No assigned team members recorded.</Text>
+                  )}
+                </View>
+
+                <View style={{ gap: spacing.xs }}>
+                  <Text style={styles.sectionHeader}>Plan and Milestones</Text>
+                  {expeditionDetail.departure_deadline ? (
+                    <Text style={{ fontFamily: typography.fontFamily.medium, fontSize: 12, color: colors.text }}>
+                      Departure deadline: {expeditionDetail.departure_deadline}
+                      {expeditionDetail.schedule
+                        ? ` | Buffer: ${expeditionDetail.schedule.total_buffer_days} days | At risk: ${expeditionDetail.schedule.at_risk_count}`
+                        : ''}
+                    </Text>
+                  ) : null}
+                  {expeditionDetail.schedule?.scheduled_milestones.length ? expeditionDetail.schedule.scheduled_milestones.map((milestone, index) => (
+                    <View key={`${milestone.name}-${index}`} style={{
+                      backgroundColor: colors.card,
+                      borderRadius: radius.default,
+                      borderWidth: 1,
+                      borderColor: milestone.is_at_risk ? colors.dangerRed : colors.cardBorder,
+                      padding: spacing.sm,
+                    }}>
+                      <Text style={{ fontFamily: typography.fontFamily.bold, fontSize: 12, color: colors.text }}>
+                        {milestone.name}{milestone.is_at_risk ? ' | At risk' : ''}
+                      </Text>
+                      <Text style={{ fontFamily: typography.fontFamily.regular, fontSize: 11, color: colors.secondaryText }}>
+                        {milestone.latest_start_date} to {milestone.latest_finish_date} | {milestone.duration_days} days
+                      </Text>
+                    </View>
+                  )) : expeditionDetail.milestones.length > 0 ? expeditionDetail.milestones.map((milestone, index) => (
+                    <Text key={`${milestone.name}-${index}`} style={{ fontFamily: typography.fontFamily.regular, fontSize: 12, color: colors.text }}>
+                      {milestone.name} | {milestone.duration_days} days
+                    </Text>
+                  )) : (
+                    <Text style={styles.emptyAlertsText}>No saved milestones for this expedition.</Text>
+                  )}
+                </View>
+
+                <View style={{ gap: spacing.xs }}>
+                  <Text style={styles.sectionHeader}>Linked Cargo</Text>
+                  {expeditionDetail.cargo.length > 0 ? expeditionDetail.cargo.map((cargo) => (
+                    <View key={cargo.id} style={{
+                      backgroundColor: colors.card,
+                      borderRadius: radius.default,
+                      borderWidth: 1,
+                      borderColor: colors.cardBorder,
+                      padding: spacing.sm,
+                    }}>
+                      <Text style={{ fontFamily: typography.fontFamily.bold, fontSize: 12, color: colors.text }}>
+                        {cargo.title} (#{cargo.shipment_code})
+                      </Text>
+                      <Text style={{ fontFamily: typography.fontFamily.regular, fontSize: 11, color: colors.secondaryText }}>
+                        {cargo.status} | {cargo.priority} | {cargo.weight_kg} kg | {cargo.volume_m3} m3
+                      </Text>
+                    </View>
+                  )) : (
+                    <Text style={styles.emptyAlertsText}>No cargo shipments linked to this expedition.</Text>
+                  )}
+                </View>
+
+                <View style={{ gap: spacing.xs }}>
+                  <Text style={styles.sectionHeader}>Expedition Activity</Text>
+                  {expeditionDetail.activity.length > 0 ? expeditionDetail.activity.map((entry) => (
+                    <View key={entry.id} style={{
+                      borderLeftWidth: 2,
+                      borderLeftColor: colors.primary,
+                      paddingLeft: spacing.sm,
+                      paddingVertical: spacing.xs,
+                    }}>
+                      <Text style={{ fontFamily: typography.fontFamily.bold, fontSize: 12, color: colors.text }}>
+                        {entry.action.replace(/_/g, ' ')}
+                      </Text>
+                      <Text style={{ fontFamily: typography.fontFamily.regular, fontSize: 11, color: colors.secondaryText }}>
+                        {entry.summary}
+                      </Text>
+                      <Text style={{ fontFamily: typography.fontFamily.regular, fontSize: 10, color: colors.secondaryText }}>
+                        {entry.performed_by} | {entry.timestamp}
+                      </Text>
+                    </View>
+                  )) : (
+                    <Text style={styles.emptyAlertsText}>No audit activity recorded for this expedition.</Text>
+                  )}
+                </View>
+              </ScrollView>
+            ) : null}
+          </SafeAreaView>
+        </View>
+      </Modal>
     </SafeAreaView>
   );
 }

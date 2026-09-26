@@ -17,6 +17,7 @@ class Expedition(Base):
     departure_deadline = Column(String, nullable=True)
     milestones_json = Column(JSON, nullable=True)
     schedule_output = Column(JSON, nullable=True)
+    assigned_members = Column(JSON, default=list)  # List of assigned user IDs or names
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 

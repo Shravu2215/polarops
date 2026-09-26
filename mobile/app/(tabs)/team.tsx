@@ -15,18 +15,25 @@ import { useApp } from '../../context/AppContext';
 import { colors, spacing, radius, typography } from '../../theme';
 import { BACKEND_URL } from '../../config';
 
-interface Person {
+interface PersonnelUser {
   id: number;
-  name: string;
+  username: string;
+  email: string;
   role: string;
   skills: string[];
-  station_name: string;
-  status: string;
-  phone?: string;
-  vehicle_assigned?: string;
+  station_name: string | null;
   latitude?: number;
   longitude?: number;
-  last_location_update?: string;
+  last_location_update: string | null;
+  expedition_name: string | null;
+  expedition_status: string | null;
+}
+
+interface Expedition {
+  id: number;
+  name: string;
+  status: string;
+  assigned_members: Array<number | string> | null;
 }
 
 interface Vehicle {
@@ -42,7 +49,7 @@ interface Vehicle {
 
 export default function TeamScreen() {
   const { token, user } = useApp();
-  const [people, setPeople] = useState<Person[]>([]);
+  const [people, setPeople] = useState<PersonnelUser[]>([]);
   const [vehicles, setVehicles] = useState<Vehicle[]>([]);
   const [loading, setLoading] = useState<boolean>(true);
   const [refreshing, setRefreshing] = useState<boolean>(false);
@@ -53,38 +60,35 @@ export default function TeamScreen() {
       const headers: Record<string, string> = {};
       if (token) headers['Authorization'] = `Bearer ${token}`;
 
-      const [peopleRes, usersRes, vehicleRes] = await Promise.all([
-        fetch(`${BACKEND_URL}/people`, { headers }),
+      const [usersRes, expeditionRes, vehicleRes] = await Promise.all([
         fetch(`${BACKEND_URL}/users`, { headers }),
+        fetch(`${BACKEND_URL}/expeditions`, { headers }),
         fetch(`${BACKEND_URL}/vehicles`, { headers }),
       ]);
 
-      let peopleList: Person[] = [];
-      if (peopleRes.ok) {
-        peopleList = await peopleRes.json();
+      if (!usersRes.ok) {
+        throw new Error(`Failed to fetch personnel (${usersRes.status})`);
       }
 
-      if (usersRes.ok) {
-        const users = await usersRes.json();
-        users.forEach((u: any) => {
-          const exists = peopleList.some(
-            p => p.name.toLowerCase() === (u.username || '').toLowerCase()
-          );
-          if (!exists) {
-            peopleList.push({
-              id: 1000 + u.id,
-              name: u.username || u.email,
-              role: u.role || 'Team Member',
-              skills: u.skills || ['general'],
-              station_name: u.station_name || 'Maitri',
-              status: 'Active',
-              last_location_update: u.last_location_update,
-            });
-          }
-        });
-      }
+      const users: Omit<PersonnelUser, 'expedition_name' | 'expedition_status'>[] = await usersRes.json();
+      const expeditions: Expedition[] = expeditionRes.ok ? await expeditionRes.json() : [];
+      const personnel = users.map((registeredUser) => {
+        const assignedExpedition = expeditions.find((expedition) =>
+          (expedition.assigned_members || []).some((memberId) =>
+            typeof memberId === 'number'
+              ? memberId === registeredUser.id
+              : memberId.toLowerCase() === registeredUser.username.toLowerCase()
+          )
+        );
 
-      setPeople(peopleList);
+        return {
+          ...registeredUser,
+          skills: registeredUser.skills || [],
+          expedition_name: assignedExpedition?.name || null,
+          expedition_status: assignedExpedition?.status || null,
+        };
+      });
+      setPeople(personnel);
 
       if (vehicleRes.ok) {
         const vehData = await vehicleRes.json();
@@ -126,18 +130,22 @@ export default function TeamScreen() {
     );
   }, [people, selectedSkill]);
 
-  const getLocationFreshness = (lastUpdate?: string) => {
-    if (!lastUpdate) return { isFresh: false, label: 'No update recorded' };
+  const getLocationFreshness = (lastUpdate: string | null) => {
+    if (!lastUpdate) return { isFresh: false, label: 'No check-in recorded', status: 'No check-in' };
     const dateMs = new Date(lastUpdate).getTime();
-    if (isNaN(dateMs)) return { isFresh: false, label: 'No update recorded' };
+    if (isNaN(dateMs)) return { isFresh: false, label: 'No valid check-in recorded', status: 'No check-in' };
     const diffMs = Date.now() - dateMs;
     const diffMins = Math.floor(diffMs / (1000 * 60));
 
-    if (diffMins < 1) return { isFresh: true, label: 'updated just now' };
-    if (diffMins <= 10) return { isFresh: true, label: `updated ${diffMins} min ago` };
-    if (diffMins < 60) return { isFresh: false, label: `updated ${diffMins} min ago` };
+    if (diffMins < 1) return { isFresh: true, label: 'updated just now', status: 'Online' };
+    if (diffMins <= 10) return { isFresh: true, label: `updated ${diffMins} min ago`, status: 'Online' };
+    if (diffMins < 60) return { isFresh: false, label: `updated ${diffMins} min ago`, status: 'Location stale' };
     const diffHours = Math.floor(diffMins / 60);
-    return { isFresh: false, label: `updated ${diffHours} hr${diffHours > 1 ? 's' : ''} ago` };
+    return {
+      isFresh: false,
+      label: `updated ${diffHours} hr${diffHours > 1 ? 's' : ''} ago`,
+      status: 'Location stale',
+    };
   };
 
   return (
@@ -199,27 +207,33 @@ export default function TeamScreen() {
                 <View key={person.id} style={styles.personCard}>
                   <View style={styles.cardHeader}>
                     <View style={styles.avatarBox}>
-                      <Text style={styles.avatarText}>{person.name.charAt(0).toUpperCase()}</Text>
+                      <Text style={styles.avatarText}>{(person.username || person.email).charAt(0).toUpperCase()}</Text>
                     </View>
                     <View style={styles.mainInfo}>
                       <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
-                        <Text style={styles.personName}>{person.name}</Text>
-                        {(person.name.toLowerCase() === (user?.username || '').toLowerCase() || person.name.toLowerCase() === (user?.email || '').toLowerCase()) ? (
+                        <Text style={styles.personName}>{person.username || person.email}</Text>
+                        {person.username.toLowerCase() === (user?.username || '').toLowerCase() ? (
                           <View style={{ backgroundColor: colors.primaryIce, paddingHorizontal: 6, paddingVertical: 1, borderRadius: 8, borderWidth: 1, borderColor: colors.cardBorder }}>
                             <Text style={{ fontFamily: typography.fontFamily.bold, fontSize: 10, color: colors.primary }}>You</Text>
                           </View>
                         ) : null}
                       </View>
+                      <Text style={styles.personEmail}>{person.email}</Text>
                       <Text style={styles.personRole}>{person.role}</Text>
                       <Text style={styles.stationLabel}>
-                        <MaterialIcons name="location-on" size={13} color={colors.primary} /> {person.station_name} Station
+                        <MaterialIcons name="location-on" size={13} color={colors.primary} /> {person.station_name || 'Station not assigned'}
+                      </Text>
+                      <Text style={styles.assignmentLabel}>
+                        {person.expedition_name
+                          ? `Expedition: ${person.expedition_name} (${person.expedition_status})`
+                          : 'Not assigned to an expedition'}
                       </Text>
                     </View>
                     {/* Location Freshness Badge */}
                     <View style={[styles.badge, freshness.isFresh ? styles.badgeFresh : styles.badgeStale]}>
                       <View style={[styles.badgeDot, freshness.isFresh ? styles.dotFresh : styles.dotStale]} />
                       <Text style={[styles.badgeText, freshness.isFresh ? styles.textFresh : styles.textStale]}>
-                        {freshness.isFresh ? 'Location Updated' : 'Location Outdated'}
+                        {freshness.status}
                       </Text>
                     </View>
                   </View>
@@ -407,6 +421,11 @@ const styles = StyleSheet.create({
     fontSize: typography.fontSize.base,
     color: colors.text,
   },
+  personEmail: {
+    fontFamily: typography.fontFamily.regular,
+    fontSize: 11,
+    color: colors.secondaryText,
+  },
   personRole: {
     fontFamily: typography.fontFamily.medium,
     fontSize: typography.fontSize.xs,
@@ -416,6 +435,12 @@ const styles = StyleSheet.create({
     fontFamily: typography.fontFamily.regular,
     fontSize: typography.fontSize.xs,
     color: colors.primary,
+    marginTop: 2,
+  },
+  assignmentLabel: {
+    fontFamily: typography.fontFamily.regular,
+    fontSize: 11,
+    color: colors.secondaryText,
     marginTop: 2,
   },
   badge: {
