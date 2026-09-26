@@ -14,7 +14,7 @@ import { useRouter } from 'expo-router';
 import { MaterialIcons } from '@expo/vector-icons';
 import * as SecureStore from 'expo-secure-store';
 import { colors, spacing, radius, typography, layout } from '../theme';
-import { BACKEND_URL } from '../config';
+import { BACKEND_URL, DEMO_PASSWORD } from '../config';
 import { useApp } from '../context/AppContext';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
@@ -225,7 +225,7 @@ export default function LoginScreen() {
                   )}
                 </TouchableOpacity>
 
-                {/* Quick Demo Login Presets — all 3 roles (DEV only) */}
+                {/* Quick Demo Login Presets — all 4 roles (DEV only) */}
                 {__DEV__ && (
                   <View style={{ marginTop: spacing.md, paddingTop: spacing.sm, borderTopWidth: 1, borderTopColor: colors.cardBorder }}>
                     <Text style={{ fontFamily: typography.fontFamily.medium, fontSize: 11, color: colors.secondaryText, marginBottom: spacing.xs }}>
@@ -247,7 +247,7 @@ export default function LoginScreen() {
                         }}
                         onPress={() => {
                           setLoginEmail('leader@polarops.in');
-                          setLoginPassword('');
+                          setLoginPassword(DEMO_PASSWORD);
                         }}
                       >
                         <MaterialIcons name="stars" size={16} color={colors.primary} />
@@ -271,12 +271,36 @@ export default function LoginScreen() {
                         }}
                         onPress={() => {
                           setLoginEmail('officer@polarops.in');
-                          setLoginPassword('');
+                          setLoginPassword(DEMO_PASSWORD);
                         }}
                       >
                         <MaterialIcons name="shield" size={16} color="#34A853" />
                         <Text style={{ fontFamily: typography.fontFamily.bold, fontSize: 10, color: '#34A853', textAlign: 'center' }}>
                           Officer
+                        </Text>
+                      </TouchableOpacity>
+
+                      {/* Base Admin */}
+                      <TouchableOpacity
+                        style={{
+                          flex: 1,
+                          alignItems: 'center',
+                          backgroundColor: '#FEF3C7',
+                          borderColor: '#D97706',
+                          borderWidth: 1,
+                          borderRadius: radius.button,
+                          paddingHorizontal: spacing.xs,
+                          paddingVertical: 8,
+                          gap: 3,
+                        }}
+                        onPress={() => {
+                          setLoginEmail('admin@polarops.in');
+                          setLoginPassword(DEMO_PASSWORD);
+                        }}
+                      >
+                        <MaterialIcons name="admin-panel-settings" size={16} color="#D97706" />
+                        <Text style={{ fontFamily: typography.fontFamily.bold, fontSize: 10, color: '#D97706', textAlign: 'center' }}>
+                          Admin
                         </Text>
                       </TouchableOpacity>
 
@@ -295,7 +319,7 @@ export default function LoginScreen() {
                         }}
                         onPress={() => {
                           setLoginEmail('member@polarops.in');
-                          setLoginPassword('');
+                          setLoginPassword(DEMO_PASSWORD);
                         }}
                       >
                         <MaterialIcons name="person" size={16} color={colors.secondaryText} />
@@ -305,7 +329,7 @@ export default function LoginScreen() {
                       </TouchableOpacity>
                     </View>
                     <Text style={{ fontFamily: typography.fontFamily.regular, fontSize: 10, color: colors.secondaryText, marginTop: 4, textAlign: 'center' }}>
-                      Tap a role → fills email → enter password
+                      Tap a role → fills credentials → press Sign In
                     </Text>
                   </View>
                 )}
