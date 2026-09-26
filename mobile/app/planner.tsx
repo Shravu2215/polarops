@@ -281,7 +281,7 @@ export default function PlannerScreen() {
                 <Text style={styles.daysText}>days</Text>
                 {!isTeamMember ? (
                   <TouchableOpacity onPress={() => removeMilestone(idx)} style={styles.deleteBtn}>
-                    <MaterialIcons name="close" size={18} color={colors.danger} />
+                    <MaterialIcons name="close" size={18} color={colors.dangerRed} />
                   </TouchableOpacity>
                 ) : null}
               </View>
@@ -352,7 +352,7 @@ export default function PlannerScreen() {
 
               {schedule.has_at_risk && (
                 <View style={styles.atRiskBanner}>
-                  <MaterialIcons name="warning" size={18} color={colors.danger} />
+                  <MaterialIcons name="warning" size={18} color={colors.dangerRed} />
                   <Text style={styles.atRiskBannerText}>
                     ATTENTION: {schedule.at_risk_count} milestone(s) flagged AT RISK (Latest start in the past)!
                   </Text>
@@ -514,7 +514,7 @@ const styles = StyleSheet.create({
   },
   cardTitle: {
     fontFamily: typography.fontFamily.bold,
-    fontSize: typography.fontSize.md,
+    fontSize: typography.fontSize.base,
     color: colors.text,
     marginBottom: spacing.sm,
   },
@@ -528,7 +528,7 @@ const styles = StyleSheet.create({
     backgroundColor: colors.background,
     borderWidth: 1,
     borderColor: colors.cardBorder,
-    borderRadius: radius.sm,
+    borderRadius: radius.default,
     paddingHorizontal: spacing.sm,
     paddingVertical: 8,
     fontFamily: typography.fontFamily.regular,
@@ -565,14 +565,14 @@ const styles = StyleSheet.create({
   addBtn: {
     backgroundColor: colors.primary,
     padding: 8,
-    borderRadius: radius.sm,
+    borderRadius: radius.default,
     alignItems: 'center',
     justifyContent: 'center',
   },
   computeBtn: {
     backgroundColor: colors.primary,
     paddingVertical: 12,
-    borderRadius: radius.sm,
+    borderRadius: radius.default,
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
@@ -602,7 +602,7 @@ const styles = StyleSheet.create({
   },
   summaryTitle: {
     fontFamily: typography.fontFamily.bold,
-    fontSize: typography.fontSize.md,
+    fontSize: typography.fontSize.base,
     color: colors.text,
   },
   summarySub: {
@@ -614,7 +614,7 @@ const styles = StyleSheet.create({
   bufferBadge: {
     paddingHorizontal: 10,
     paddingVertical: 4,
-    borderRadius: radius.full,
+    borderRadius: radius.circle,
   },
   bufferSuccess: { backgroundColor: '#DCFCE7' },
   bufferDanger: { backgroundColor: '#FEE2E2' },
@@ -635,12 +635,12 @@ const styles = StyleSheet.create({
   atRiskBannerText: {
     fontFamily: typography.fontFamily.bold,
     fontSize: 11,
-    color: colors.danger,
+    color: colors.dangerRed,
     flex: 1,
   },
   sectionTitle: {
     fontFamily: typography.fontFamily.bold,
-    fontSize: typography.fontSize.md,
+    fontSize: typography.fontSize.base,
     color: colors.text,
     marginBottom: spacing.sm,
   },
@@ -673,7 +673,7 @@ const styles = StyleSheet.create({
     zIndex: 2,
   },
   nodeNormal: { backgroundColor: colors.primary },
-  nodeAtRisk: { backgroundColor: colors.danger },
+  nodeAtRisk: { backgroundColor: colors.dangerRed },
   timelineContent: {
     backgroundColor: colors.card,
     borderRadius: radius.card,
@@ -682,7 +682,7 @@ const styles = StyleSheet.create({
     padding: spacing.md,
   },
   contentAtRisk: {
-    borderColor: colors.danger,
+    borderColor: colors.dangerRed,
     backgroundColor: '#FFF5F5',
   },
   timelineHeaderRow: {
@@ -701,18 +701,18 @@ const styles = StyleSheet.create({
     backgroundColor: '#FEE2E2',
     paddingHorizontal: 8,
     paddingVertical: 2,
-    borderRadius: radius.xs,
+    borderRadius: radius.default,
   },
   atRiskBadgeText: {
     fontFamily: typography.fontFamily.bold,
     fontSize: 10,
-    color: colors.danger,
+    color: colors.dangerRed,
   },
   onTrackBadge: {
     backgroundColor: '#DCFCE7',
     paddingHorizontal: 8,
     paddingVertical: 2,
-    borderRadius: radius.xs,
+    borderRadius: radius.default,
   },
   onTrackBadgeText: {
     fontFamily: typography.fontFamily.bold,
@@ -731,12 +731,12 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
     backgroundColor: colors.background,
     padding: spacing.xs,
-    borderRadius: radius.sm,
+    borderRadius: radius.default,
   },
   dateCol: { alignItems: 'center' },
   dateLabel: { fontFamily: typography.fontFamily.regular, fontSize: 10, color: colors.secondaryText },
   dateVal: { fontFamily: typography.fontFamily.bold, fontSize: 11, color: colors.text },
-  dateValRisk: { color: colors.danger },
+  dateValRisk: { color: colors.dangerRed },
   sub: {
     fontFamily: typography.fontFamily.regular,
     fontSize: typography.fontSize.sm,

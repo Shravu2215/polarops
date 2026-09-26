@@ -323,7 +323,7 @@ const styles = StyleSheet.create({
   },
   sectionTitle: {
     fontFamily: typography.fontFamily.bold,
-    fontSize: typography.fontSize.md,
+    fontSize: typography.fontSize.base,
     color: colors.text,
   },
   refreshBtn: {
@@ -338,7 +338,7 @@ const styles = StyleSheet.create({
   chip: {
     paddingHorizontal: spacing.md,
     paddingVertical: spacing.xs,
-    borderRadius: radius.full,
+    borderRadius: radius.circle,
     backgroundColor: colors.card,
     borderWidth: 1,
     borderColor: colors.cardBorder,
@@ -366,7 +366,7 @@ const styles = StyleSheet.create({
   },
   emptyTitle: {
     fontFamily: typography.fontFamily.bold,
-    fontSize: typography.fontSize.md,
+    fontSize: typography.fontSize.base,
     color: colors.text,
   },
   emptySub: {
@@ -399,7 +399,7 @@ const styles = StyleSheet.create({
   },
   avatarText: {
     fontFamily: typography.fontFamily.bold,
-    fontSize: typography.fontSize.md,
+    fontSize: typography.fontSize.base,
     color: colors.primary,
   },
   mainInfo: {
@@ -407,7 +407,7 @@ const styles = StyleSheet.create({
   },
   personName: {
     fontFamily: typography.fontFamily.bold,
-    fontSize: typography.fontSize.md,
+    fontSize: typography.fontSize.base,
     color: colors.text,
   },
   personRole: {
@@ -426,7 +426,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     paddingHorizontal: 8,
     paddingVertical: 4,
-    borderRadius: radius.sm,
+    borderRadius: radius.default,
     gap: 4,
   },
   badgeFresh: {
@@ -466,7 +466,7 @@ const styles = StyleSheet.create({
     backgroundColor: colors.background,
     paddingHorizontal: 8,
     paddingVertical: 2,
-    borderRadius: radius.xs,
+    borderRadius: radius.default,
     borderWidth: 1,
     borderColor: colors.cardBorder,
   },
@@ -493,7 +493,7 @@ const styles = StyleSheet.create({
     backgroundColor: '#E2E8F0',
     paddingHorizontal: 8,
     paddingVertical: 2,
-    borderRadius: radius.sm,
+    borderRadius: radius.default,
   },
   statusText: {
     fontFamily: typography.fontFamily.bold,
@@ -514,7 +514,7 @@ const styles = StyleSheet.create({
   vehicleIconBox: {
     width: 40,
     height: 40,
-    borderRadius: radius.md,
+    borderRadius: radius.card,
     backgroundColor: '#F0F9FF',
     alignItems: 'center',
     justifyContent: 'center',
