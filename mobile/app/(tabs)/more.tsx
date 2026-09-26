@@ -259,29 +259,33 @@ export default function MoreScreen() {
             <MaterialIcons name="chevron-right" size={22} color={colors.secondaryText} />
           </TouchableOpacity>
 
-          <TouchableOpacity style={styles.menuItem} onPress={() => router.push('/planner')}>
-            <MaterialIcons name="event" size={22} color={colors.primary} />
-            <Text style={styles.menuText}>Expedition Planner</Text>
-            <MaterialIcons name="chevron-right" size={22} color={colors.secondaryText} />
-          </TouchableOpacity>
+          {!isTeamMember && (
+            <>
+              <TouchableOpacity style={styles.menuItem} onPress={() => router.push('/planner')}>
+                <MaterialIcons name="event" size={22} color={colors.primary} />
+                <Text style={styles.menuText}>Expedition Planner</Text>
+                <MaterialIcons name="chevron-right" size={22} color={colors.secondaryText} />
+              </TouchableOpacity>
 
-          <TouchableOpacity style={styles.menuItem} onPress={() => router.push('/cargo')}>
-            <MaterialIcons name="local-shipping" size={22} color={colors.accentOrange} />
-            <Text style={styles.menuText}>Cargo & Knapsack Optimizer</Text>
-            <MaterialIcons name="chevron-right" size={22} color={colors.secondaryText} />
-          </TouchableOpacity>
+              <TouchableOpacity style={styles.menuItem} onPress={() => router.push('/cargo')}>
+                <MaterialIcons name="local-shipping" size={22} color={colors.accentOrange} />
+                <Text style={styles.menuText}>Cargo Loading Planner</Text>
+                <MaterialIcons name="chevron-right" size={22} color={colors.secondaryText} />
+              </TouchableOpacity>
 
-          <TouchableOpacity style={styles.menuItem} onPress={() => router.push('/simulator')}>
-            <MaterialIcons name="equalizer" size={22} color={colors.warningAmber} />
-            <Text style={styles.menuText}>What-If Simulator (Monte Carlo)</Text>
-            <MaterialIcons name="chevron-right" size={22} color={colors.secondaryText} />
-          </TouchableOpacity>
+              <TouchableOpacity style={styles.menuItem} onPress={() => router.push('/simulator')}>
+                <MaterialIcons name="equalizer" size={22} color={colors.warningAmber} />
+                <Text style={styles.menuText}>Risk & Delay Estimator</Text>
+                <MaterialIcons name="chevron-right" size={22} color={colors.secondaryText} />
+              </TouchableOpacity>
 
-          <TouchableOpacity style={styles.menuItem} onPress={() => router.push('/compliance')}>
-            <MaterialIcons name="gavel" size={22} color={colors.okGreen} />
-            <Text style={styles.menuText}>Environmental & Hash Audit</Text>
-            <MaterialIcons name="chevron-right" size={22} color={colors.secondaryText} />
-          </TouchableOpacity>
+              <TouchableOpacity style={styles.menuItem} onPress={() => router.push('/compliance')}>
+                <MaterialIcons name="gavel" size={22} color={colors.okGreen} />
+                <Text style={styles.menuText}>Activity Log & Verification</Text>
+                <MaterialIcons name="chevron-right" size={22} color={colors.secondaryText} />
+              </TouchableOpacity>
+            </>
+          )}
         </View>
 
         {/* Logout Button */}

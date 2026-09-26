@@ -218,6 +218,7 @@ export default function HomeScreen() {
                   {data.active_expedition_name || 'Active Expedition'}
                 </Text>
                 <Text style={styles.heroTitle}>Survival Days Left</Text>
+                <Text style={styles.heroSubText}>Based on current stock and daily team usage</Text>
               </View>
 
               <View style={styles.stationBadge}>
@@ -294,33 +295,52 @@ export default function HomeScreen() {
           </View>
         )}
 
-        {/* 2x2 Stat Cards */}
+        {/* Stat Cards */}
         <Text style={styles.sectionHeader}>Station Operational Metrics</Text>
-        <View style={styles.statsGrid}>
-          <View style={styles.statCard}>
-            <MaterialIcons name="flag" size={22} color={colors.primary} />
-            <Text style={styles.statValue}>{data?.active_expeditions ?? 0}</Text>
-            <Text style={styles.statLabel}>Active Expeditions</Text>
-          </View>
+        {isTeamMember ? (
+          <View style={styles.statsGrid}>
+            <View style={styles.statCard}>
+              <MaterialIcons name="people" size={22} color={colors.okGreen} />
+              <Text style={styles.statValue}>{data?.personnel_on_field ?? 0}</Text>
+              <Text style={styles.statLabel}>Team Currently Active</Text>
+              <Text style={styles.statSubLabel}>Checked in within last 10 minutes</Text>
+            </View>
 
-          <View style={styles.statCard}>
-            <MaterialIcons name="local-shipping" size={22} color={colors.accentOrange} />
-            <Text style={styles.statValue}>{data?.cargo_in_transit ?? 0}</Text>
-            <Text style={styles.statLabel}>Cargo In-Transit</Text>
+            <View style={styles.statCard}>
+              <MaterialIcons name="warning" size={22} color={colors.dangerRed} />
+              <Text style={styles.statValue}>{data?.latest_alerts?.length ?? 0}</Text>
+              <Text style={styles.statLabel}>Active Alerts</Text>
+              <Text style={styles.statSubLabel}>Current station warnings</Text>
+            </View>
           </View>
+        ) : (
+          <View style={styles.statsGrid}>
+            <View style={styles.statCard}>
+              <MaterialIcons name="flag" size={22} color={colors.primary} />
+              <Text style={styles.statValue}>{data?.active_expeditions ?? 0}</Text>
+              <Text style={styles.statLabel}>Active Expeditions</Text>
+            </View>
 
-          <View style={styles.statCard}>
-            <MaterialIcons name="people" size={22} color={colors.okGreen} />
-            <Text style={styles.statValue}>{data?.personnel_on_field ?? 0}</Text>
-            <Text style={styles.statLabel}>Active Responders (10m)</Text>
-          </View>
+            <View style={styles.statCard}>
+              <MaterialIcons name="local-shipping" size={22} color={colors.accentOrange} />
+              <Text style={styles.statValue}>{data?.cargo_in_transit ?? 0}</Text>
+              <Text style={styles.statLabel}>Cargo In-Transit</Text>
+            </View>
 
-          <View style={styles.statCard}>
-            <MaterialIcons name="warning" size={22} color={colors.dangerRed} />
-            <Text style={styles.statValue}>{data?.low_stock_items ?? 0}</Text>
-            <Text style={styles.statLabel}>Low Stock Items</Text>
+            <View style={styles.statCard}>
+              <MaterialIcons name="people" size={22} color={colors.okGreen} />
+              <Text style={styles.statValue}>{data?.personnel_on_field ?? 0}</Text>
+              <Text style={styles.statLabel}>Team Currently Active</Text>
+              <Text style={styles.statSubLabel}>Checked in within last 10 minutes</Text>
+            </View>
+
+            <View style={styles.statCard}>
+              <MaterialIcons name="warning" size={22} color={colors.dangerRed} />
+              <Text style={styles.statValue}>{data?.low_stock_items ?? 0}</Text>
+              <Text style={styles.statLabel}>Low Stock Items</Text>
+            </View>
           </View>
-        </View>
+        )}
 
         {/* Weather Card */}
         <Text style={styles.sectionHeader}>
@@ -486,6 +506,12 @@ const styles = StyleSheet.create({
     fontSize: typography.fontSize.lg,
     color: colors.text,
   },
+  heroSubText: {
+    fontFamily: typography.fontFamily.regular,
+    fontSize: 11,
+    color: colors.secondaryText,
+    marginTop: 2,
+  },
   stationBadge: {
     backgroundColor: colors.primaryIce,
     paddingHorizontal: spacing.sm + 2,
@@ -631,6 +657,12 @@ const styles = StyleSheet.create({
     fontFamily: typography.fontFamily.regular,
     fontSize: typography.fontSize.xs,
     color: colors.secondaryText,
+  },
+  statSubLabel: {
+    fontFamily: typography.fontFamily.regular,
+    fontSize: 10,
+    color: colors.secondaryText,
+    marginTop: 1,
   },
   weatherCard: {
     backgroundColor: colors.card,
