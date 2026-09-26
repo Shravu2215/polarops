@@ -52,7 +52,7 @@ export default function MoreScreen() {
   // User Provisioning Form (Leader only)
   const [newUsername, setNewUsername] = useState<string>('');
   const [newUserEmail, setNewUserEmail] = useState<string>('');
-  const [newUserPassword, setNewUserPassword] = useState<string>('password123');
+  const [newUserPassword, setNewUserPassword] = useState<string>('');
   const [newUserRole, setNewUserRole] = useState<string>('Logistics Officer');
 
   const handleLogout = async () => {

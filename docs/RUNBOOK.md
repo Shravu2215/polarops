@@ -94,7 +94,7 @@ When logging into the mobile application or testing REST endpoints:
 
 - **Expedition Leader Account**:
   - **Email / Username**: `leader@polarops.in` or `leader`
-  - **Password**: `password123`
+  - **Password**: Print/logged to console during database seed, or set via `ADMIN_PASSWORD` environment variable
   - **Role**: Expedition Leader
   - **Station**: Maitri
 

@@ -44,7 +44,7 @@ export default function UsersScreen() {
   // Form State
   const [username, setUsername] = useState<string>('');
   const [email, setEmail] = useState<string>('');
-  const [password, setPassword] = useState<string>('password123');
+  const [password, setPassword] = useState<string>('');
   const [role, setRole] = useState<string>('Team Member');
   const [stationName, setStationName] = useState<string>('Maitri');
   const [selectedSkills, setSelectedSkills] = useState<string[]>([]);

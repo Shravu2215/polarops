@@ -1,5 +1,6 @@
 import os
 import sys
+import secrets
 from datetime import datetime, timezone, timedelta
 from database import SessionLocal, engine, Base
 import models
@@ -21,13 +22,19 @@ def seed_database(reset: bool = True):
         print("[+] Initializing clean PolarOps database (No mock data)...")
 
         admin_email = os.getenv("ADMIN_EMAIL", "leader@polarops.in")
-        admin_password = os.getenv("ADMIN_PASSWORD", "password123")
+        env_admin_password = os.getenv("ADMIN_PASSWORD")
+        if env_admin_password:
+            demo_password = env_admin_password
+        else:
+            demo_password = secrets.token_urlsafe(12)
+
+        print(f"[!] Demo accounts seeded with password: {demo_password}")
 
         # Create Bootstrap Expedition Leader Account
         leader_user = models.User(
             username="leader",
             email=admin_email,
-            hashed_password=hash_password(admin_password),
+            hashed_password=hash_password(demo_password),
             role="Expedition Leader",
             station_name="Maitri"
         )
@@ -37,7 +44,7 @@ def seed_database(reset: bool = True):
         officer_user = models.User(
             username="officer",
             email="officer@polarops.in",
-            hashed_password=hash_password("password123"),
+            hashed_password=hash_password(demo_password),
             role="Officer",
             station_name="Maitri"
         )
@@ -47,7 +54,7 @@ def seed_database(reset: bool = True):
         member_user = models.User(
             username="member",
             email="member@polarops.in",
-            hashed_password=hash_password("password123"),
+            hashed_password=hash_password(demo_password),
             role="Team Member",
             station_name="Maitri"
         )

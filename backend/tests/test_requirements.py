@@ -61,7 +61,7 @@ class TestRequirementsSuite(unittest.TestCase):
         resp = self.client.post("/auth/register", json={
             "username": "hacker",
             "email": "hacker@polarops.in",
-            "password": "password123",
+            "password": "test_suite_password_2026",
             "role": "Expedition Leader"  # Client trying to claim Leader role!
         })
         self.assertEqual(resp.status_code, 200)
@@ -81,7 +81,7 @@ class TestRequirementsSuite(unittest.TestCase):
         reg_resp = self.client.post("/auth/register", json={
             "username": "alex",
             "email": "alex@polarops.in",
-            "password": "password123"
+            "password": "test_suite_password_2026"
         })
         team_token = reg_resp.json()["access_token"]
         team_headers = {"Authorization": f"Bearer {team_token}"}
@@ -109,7 +109,7 @@ class TestRequirementsSuite(unittest.TestCase):
         doctor_user = models.User(
             username="drsarah",
             email="sarah@polarops.in",
-            hashed_password=hash_password("password123"),
+            hashed_password=hash_password("test_suite_password_2026"),
             role="Team Member",
             station_name="Maitri",
             skills=["doctor", "first_aid"],
@@ -150,7 +150,7 @@ class TestRequirementsSuite(unittest.TestCase):
         reg_resp = self.client.post("/auth/register", json={
             "username": "alex",
             "email": "alex@polarops.in",
-            "password": "password123"
+            "password": "test_suite_password_2026"
         })
         team_headers = {"Authorization": f"Bearer {reg_resp.json()['access_token']}"}
 
