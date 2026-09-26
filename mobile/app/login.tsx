@@ -14,7 +14,7 @@ import { useRouter } from 'expo-router';
 import { MaterialIcons } from '@expo/vector-icons';
 import * as SecureStore from 'expo-secure-store';
 import { colors, spacing, radius, typography, layout } from '../theme';
-import { BACKEND_URL } from '../config';
+import { BACKEND_URL, DEMO_PASSWORD } from '../config';
 import { useApp } from '../context/AppContext';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
@@ -37,7 +37,44 @@ export default function LoginScreen() {
   const [loading, setLoading] = useState<boolean>(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
+  const handleQuickLogin = async (email: string) => {
+    setLoginEmail(email);
+    setLoginPassword(DEMO_PASSWORD);
+    setLoading(true);
+    setErrorMessage(null);
+    try {
+      const response = await fetch(`${BACKEND_URL}/auth/login`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          email: email.trim(),
+          password: DEMO_PASSWORD,
+        }),
+      });
 
+      if (!response.ok) {
+        const errData = await response.json().catch(() => ({}));
+        throw new Error(errData.detail || `Invalid credentials (${response.status})`);
+      }
+
+      const data = await response.json();
+      setUser(data.user);
+      setToken(data.access_token);
+
+      try {
+        await SecureStore.setItemAsync('access_token', data.access_token);
+      } catch (e) {}
+
+      router.replace('/(tabs)');
+    } catch (err: any) {
+      console.log('Login failed:', err);
+      setErrorMessage(
+        err.message || `Unable to reach backend at ${BACKEND_URL}. Check network connection.`
+      );
+    } finally {
+      setLoading(false);
+    }
+  };
 
   const handleSignIn = async () => {
     if (!loginEmail.trim() || !loginPassword) {
@@ -200,7 +237,7 @@ export default function LoginScreen() {
                     <MaterialIcons name="lock" size={20} color={colors.secondaryText} />
                     <TextInput
                       style={styles.textInput}
-                      placeholder="check backend console for seeded password"
+                      placeholder="Enter password"
                       placeholderTextColor={colors.secondaryText}
                       value={loginPassword}
                       onChangeText={setLoginPassword}
@@ -225,114 +262,104 @@ export default function LoginScreen() {
                   )}
                 </TouchableOpacity>
 
-                {/* Quick Demo Login Presets — all 4 roles (DEV only) */}
-                {__DEV__ && (
-                  <View style={{ marginTop: spacing.md, paddingTop: spacing.sm, borderTopWidth: 1, borderTopColor: colors.cardBorder }}>
-                    <Text style={{ fontFamily: typography.fontFamily.medium, fontSize: 11, color: colors.secondaryText, marginBottom: spacing.xs }}>
-                      QUICK FILL — DEMO ACCOUNTS:
-                    </Text>
-                    <View style={{ flexDirection: 'row', gap: spacing.xs }}>
-                      {/* Leader */}
-                      <TouchableOpacity
-                        style={{
-                          flex: 1,
-                          alignItems: 'center',
-                          backgroundColor: colors.primaryIce,
-                          borderColor: colors.primary,
-                          borderWidth: 1,
-                          borderRadius: radius.button,
-                          paddingHorizontal: spacing.xs,
-                          paddingVertical: 8,
-                          gap: 3,
-                        }}
-                        onPress={() => {
-                          setLoginEmail('leader@polarops.in');
-                          setLoginPassword('');
-                        }}
-                      >
-                        <MaterialIcons name="stars" size={16} color={colors.primary} />
-                        <Text style={{ fontFamily: typography.fontFamily.bold, fontSize: 10, color: colors.primary, textAlign: 'center' }}>
-                          Leader
-                        </Text>
-                      </TouchableOpacity>
+                {/* Quick Demo Login Presets — One-tap Login for Judges */}
+                <View style={{ marginTop: spacing.md, paddingTop: spacing.sm, borderTopWidth: 1, borderTopColor: colors.cardBorder }}>
+                  <Text style={{ fontFamily: typography.fontFamily.medium, fontSize: 11, color: colors.secondaryText, marginBottom: spacing.xs }}>
+                    QUICK LOGIN (DEMO ACCOUNTS):
+                  </Text>
+                  <View style={{ flexDirection: 'row', gap: spacing.xs }}>
+                    {/* Leader */}
+                    <TouchableOpacity
+                      style={{
+                        flex: 1,
+                        alignItems: 'center',
+                        backgroundColor: colors.primaryIce,
+                        borderColor: colors.primary,
+                        borderWidth: 1,
+                        borderRadius: radius.button,
+                        paddingHorizontal: spacing.xs,
+                        paddingVertical: 8,
+                        gap: 3,
+                      }}
+                      onPress={() => handleQuickLogin('leader@polarops.in')}
+                      disabled={loading}
+                    >
+                      <MaterialIcons name="stars" size={16} color={colors.primary} />
+                      <Text style={{ fontFamily: typography.fontFamily.bold, fontSize: 10, color: colors.primary, textAlign: 'center' }}>
+                        Leader
+                      </Text>
+                    </TouchableOpacity>
 
-                      {/* Officer */}
-                      <TouchableOpacity
-                        style={{
-                          flex: 1,
-                          alignItems: 'center',
-                          backgroundColor: '#EDF7F0',
-                          borderColor: '#34A853',
-                          borderWidth: 1,
-                          borderRadius: radius.button,
-                          paddingHorizontal: spacing.xs,
-                          paddingVertical: 8,
-                          gap: 3,
-                        }}
-                        onPress={() => {
-                          setLoginEmail('officer@polarops.in');
-                          setLoginPassword('');
-                        }}
-                      >
-                        <MaterialIcons name="shield" size={16} color="#34A853" />
-                        <Text style={{ fontFamily: typography.fontFamily.bold, fontSize: 10, color: '#34A853', textAlign: 'center' }}>
-                          Officer
-                        </Text>
-                      </TouchableOpacity>
+                    {/* Officer */}
+                    <TouchableOpacity
+                      style={{
+                        flex: 1,
+                        alignItems: 'center',
+                        backgroundColor: '#EDF7F0',
+                        borderColor: '#34A853',
+                        borderWidth: 1,
+                        borderRadius: radius.button,
+                        paddingHorizontal: spacing.xs,
+                        paddingVertical: 8,
+                        gap: 3,
+                      }}
+                      onPress={() => handleQuickLogin('officer@polarops.in')}
+                      disabled={loading}
+                    >
+                      <MaterialIcons name="shield" size={16} color="#34A853" />
+                      <Text style={{ fontFamily: typography.fontFamily.bold, fontSize: 10, color: '#34A853', textAlign: 'center' }}>
+                        Officer
+                      </Text>
+                    </TouchableOpacity>
 
-                      {/* Base Admin */}
-                      <TouchableOpacity
-                        style={{
-                          flex: 1,
-                          alignItems: 'center',
-                          backgroundColor: '#FEF3C7',
-                          borderColor: '#D97706',
-                          borderWidth: 1,
-                          borderRadius: radius.button,
-                          paddingHorizontal: spacing.xs,
-                          paddingVertical: 8,
-                          gap: 3,
-                        }}
-                        onPress={() => {
-                          setLoginEmail('admin@polarops.in');
-                          setLoginPassword('');
-                        }}
-                      >
-                        <MaterialIcons name="admin-panel-settings" size={16} color="#D97706" />
-                        <Text style={{ fontFamily: typography.fontFamily.bold, fontSize: 10, color: '#D97706', textAlign: 'center' }}>
-                          Admin
-                        </Text>
-                      </TouchableOpacity>
+                    {/* Base Admin */}
+                    <TouchableOpacity
+                      style={{
+                        flex: 1,
+                        alignItems: 'center',
+                        backgroundColor: '#FEF3C7',
+                        borderColor: '#D97706',
+                        borderWidth: 1,
+                        borderRadius: radius.button,
+                        paddingHorizontal: spacing.xs,
+                        paddingVertical: 8,
+                        gap: 3,
+                      }}
+                      onPress={() => handleQuickLogin('admin@polarops.in')}
+                      disabled={loading}
+                    >
+                      <MaterialIcons name="admin-panel-settings" size={16} color="#D97706" />
+                      <Text style={{ fontFamily: typography.fontFamily.bold, fontSize: 10, color: '#D97706', textAlign: 'center' }}>
+                        Admin
+                      </Text>
+                    </TouchableOpacity>
 
-                      {/* Team Member */}
-                      <TouchableOpacity
-                        style={{
-                          flex: 1,
-                          alignItems: 'center',
-                          backgroundColor: '#F3F4F6',
-                          borderColor: colors.secondaryText,
-                          borderWidth: 1,
-                          borderRadius: radius.button,
-                          paddingHorizontal: spacing.xs,
-                          paddingVertical: 8,
-                          gap: 3,
-                        }}
-                        onPress={() => {
-                          setLoginEmail('member@polarops.in');
-                          setLoginPassword('');
-                        }}
-                      >
-                        <MaterialIcons name="person" size={16} color={colors.secondaryText} />
-                        <Text style={{ fontFamily: typography.fontFamily.bold, fontSize: 10, color: colors.secondaryText, textAlign: 'center' }}>
-                          Member
-                        </Text>
-                      </TouchableOpacity>
-                    </View>
-                    <Text style={{ fontFamily: typography.fontFamily.regular, fontSize: 10, color: colors.secondaryText, marginTop: 4, textAlign: 'center' }}>
-                      Tap a role → pre-fills email (check console for password)
-                    </Text>
+                    {/* Team Member */}
+                    <TouchableOpacity
+                      style={{
+                        flex: 1,
+                        alignItems: 'center',
+                        backgroundColor: '#F3F4F6',
+                        borderColor: colors.secondaryText,
+                        borderWidth: 1,
+                        borderRadius: radius.button,
+                        paddingHorizontal: spacing.xs,
+                        paddingVertical: 8,
+                        gap: 3,
+                      }}
+                      onPress={() => handleQuickLogin('member@polarops.in')}
+                      disabled={loading}
+                    >
+                      <MaterialIcons name="person" size={16} color={colors.secondaryText} />
+                      <Text style={{ fontFamily: typography.fontFamily.bold, fontSize: 10, color: colors.secondaryText, textAlign: 'center' }}>
+                        Member
+                      </Text>
+                    </TouchableOpacity>
                   </View>
-                )}
+                  <Text style={{ fontFamily: typography.fontFamily.regular, fontSize: 10, color: colors.secondaryText, marginTop: 4, textAlign: 'center' }}>
+                    One-tap instant login for demo evaluation
+                  </Text>
+                </View>
               </View>
 
             ) : (
