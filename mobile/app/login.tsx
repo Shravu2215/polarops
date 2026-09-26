@@ -14,7 +14,7 @@ import { useRouter } from 'expo-router';
 import { MaterialIcons } from '@expo/vector-icons';
 import * as SecureStore from 'expo-secure-store';
 import { colors, spacing, radius, typography, layout } from '../theme';
-import { BACKEND_URL, DEMO_PASSWORD } from '../config';
+import { BACKEND_URL } from '../config';
 import { useApp } from '../context/AppContext';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
@@ -200,7 +200,7 @@ export default function LoginScreen() {
                     <MaterialIcons name="lock" size={20} color={colors.secondaryText} />
                     <TextInput
                       style={styles.textInput}
-                      placeholder="Enter password"
+                      placeholder="check backend console for seeded password"
                       placeholderTextColor={colors.secondaryText}
                       value={loginPassword}
                       onChangeText={setLoginPassword}
@@ -247,7 +247,7 @@ export default function LoginScreen() {
                         }}
                         onPress={() => {
                           setLoginEmail('leader@polarops.in');
-                          setLoginPassword(DEMO_PASSWORD);
+                          setLoginPassword('');
                         }}
                       >
                         <MaterialIcons name="stars" size={16} color={colors.primary} />
@@ -271,7 +271,7 @@ export default function LoginScreen() {
                         }}
                         onPress={() => {
                           setLoginEmail('officer@polarops.in');
-                          setLoginPassword(DEMO_PASSWORD);
+                          setLoginPassword('');
                         }}
                       >
                         <MaterialIcons name="shield" size={16} color="#34A853" />
@@ -295,7 +295,7 @@ export default function LoginScreen() {
                         }}
                         onPress={() => {
                           setLoginEmail('admin@polarops.in');
-                          setLoginPassword(DEMO_PASSWORD);
+                          setLoginPassword('');
                         }}
                       >
                         <MaterialIcons name="admin-panel-settings" size={16} color="#D97706" />
@@ -319,7 +319,7 @@ export default function LoginScreen() {
                         }}
                         onPress={() => {
                           setLoginEmail('member@polarops.in');
-                          setLoginPassword(DEMO_PASSWORD);
+                          setLoginPassword('');
                         }}
                       >
                         <MaterialIcons name="person" size={16} color={colors.secondaryText} />
@@ -329,7 +329,7 @@ export default function LoginScreen() {
                       </TouchableOpacity>
                     </View>
                     <Text style={{ fontFamily: typography.fontFamily.regular, fontSize: 10, color: colors.secondaryText, marginTop: 4, textAlign: 'center' }}>
-                      Tap a role → fills credentials → press Sign In
+                      Tap a role → pre-fills email (check console for password)
                     </Text>
                   </View>
                 )}
