@@ -189,6 +189,13 @@ export default function HomeScreen() {
   const [isOfflineData, setIsOfflineData] = useState<boolean>(false);
 
   const fetchDashboardData = async () => {
+    if (!token) {
+      setData(null);
+      setLoading(false);
+      setRefreshing(false);
+      return;
+    }
+
     try {
       const headers: Record<string, string> = { 'Content-Type': 'application/json' };
       if (token) {

@@ -12,6 +12,7 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
+import * as SecureStore from 'expo-secure-store';
 import { MaterialIcons } from '@expo/vector-icons';
 import Header from '../components/Header';
 import { useApp } from '../context/AppContext';
@@ -80,12 +81,12 @@ interface ShipmentEntry {
   status: string;
   station_name: string | null;
   direction: string;
-  items: Array<{ supply_name: string; quantity: number }>;
+  items_json: Array<{ supply_name: string; quantity: number }>;
 }
 
 export default function CargoScreen() {
   const router = useRouter();
-  const { token, user } = useApp();
+  const { token, user, logout } = useApp();
   const [expeditions, setExpeditions] = useState<ExpeditionOption[]>([]);
   const [selectedExpeditionId, setSelectedExpeditionId] = useState<number | null>(null);
   const [requirements, setRequirements] = useState<RequirementItem[]>([]);
@@ -116,6 +117,14 @@ export default function CargoScreen() {
   const isExpeditionLeader = user?.role === 'Expedition Leader';
   const isTeamMember = user?.role === 'Team Member';
   const isWriteAllowed = isLogisticsOfficer;
+
+  const handleSwitchAccount = async () => {
+    logout();
+    try {
+      await SecureStore.deleteItemAsync('access_token');
+    } catch (error) {}
+    router.replace('/login');
+  };
 
   const fetchExpeditions = async () => {
     if (!token) return [];
@@ -575,6 +584,20 @@ export default function CargoScreen() {
           </View>
         </View>
 
+        {!isLogisticsOfficer ? (
+          <View style={styles.panel}>
+            <Text style={styles.sectionTitle}>Cargo editing is Logistics Officer only</Text>
+            <Text style={styles.emptyText}>
+              {isExpeditionLeader
+                ? 'Review submitted manifests below. Drafting and load optimization require a Logistics Officer account.'
+                : `Manifest drafting and load optimization require a Logistics Officer account. Signed in as ${user?.role ?? 'guest'}.`}
+            </Text>
+            <TouchableOpacity style={styles.secondaryButton} onPress={() => void handleSwitchAccount()}>
+              <Text style={styles.secondaryButtonText}>Switch account</Text>
+            </TouchableOpacity>
+          </View>
+        ) : null}
+
         {isLogisticsOfficer ? (
           <>
             <View style={styles.panel}>
@@ -611,7 +634,7 @@ export default function CargoScreen() {
                     <Text style={styles.manifestStatus}>{shipment.status}</Text>
                   </View>
                   <Text style={styles.metaText}>Shipment: {shipment.shipment_code}</Text>
-                  {shipment.items.map((item, index) => (
+                  {shipment.items_json.map((item, index) => (
                     <Text key={`${shipment.id}-${index}`} style={styles.itemText}>{item.supply_name} × {item.quantity}</Text>
                   ))}
                   {shipment.status === 'Pending' ? (

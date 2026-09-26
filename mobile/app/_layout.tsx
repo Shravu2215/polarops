@@ -1,5 +1,5 @@
 import React, { useEffect } from 'react';
-import { Stack } from 'expo-router';
+import { Stack, useRouter, useSegments } from 'expo-router';
 import { useFonts, DMSans_400Regular, DMSans_500Medium, DMSans_700Bold } from '@expo-google-fonts/dm-sans';
 import * as SplashScreen from 'expo-splash-screen';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
@@ -26,6 +26,31 @@ function LocationWatcher() {
   return null;
 }
 
+function AppStack() {
+  const router = useRouter();
+  const segments = useSegments();
+  const { token } = useApp();
+  const isLoginRoute = segments[0] === 'login';
+
+  useEffect(() => {
+    if (!token && !isLoginRoute) router.replace('/login');
+    else if (token && isLoginRoute) router.replace('/(tabs)');
+  }, [isLoginRoute, router, token]);
+
+  return (
+    <Stack screenOptions={{ headerShown: false }}>
+      <Stack.Screen name="login" />
+      <Stack.Screen name="(tabs)" />
+      <Stack.Screen name="sos" options={{ presentation: 'modal' }} />
+      <Stack.Screen name="planner" />
+      <Stack.Screen name="cargo" />
+      <Stack.Screen name="simulator" />
+      <Stack.Screen name="compliance" />
+      <Stack.Screen name="sync" />
+    </Stack>
+  );
+}
+
 export default function RootLayout() {
   const [fontsLoaded] = useFonts({
     DMSans_400Regular,
@@ -49,16 +74,7 @@ export default function RootLayout() {
         <SyncProvider>
           <LocationWatcher />
           <StatusBar style="dark" />
-          <Stack screenOptions={{ headerShown: false }}>
-            <Stack.Screen name="login" />
-            <Stack.Screen name="(tabs)" />
-            <Stack.Screen name="sos" options={{ presentation: 'modal' }} />
-            <Stack.Screen name="planner" />
-            <Stack.Screen name="cargo" />
-            <Stack.Screen name="simulator" />
-            <Stack.Screen name="compliance" />
-            <Stack.Screen name="sync" />
-          </Stack>
+          <AppStack />
         </SyncProvider>
       </AppProvider>
     </SafeAreaProvider>
