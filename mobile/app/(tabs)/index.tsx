@@ -131,6 +131,7 @@ interface LowStockItem {
   unit: string;
   min_required: number;
   location_station: string;
+  status: 'IN STOCK' | 'LOW STOCK' | 'CRITICAL' | 'OUT OF STOCK';
 }
 
 interface TeamRosterItem {
@@ -676,15 +677,19 @@ export default function HomeScreen() {
             </View>
 
             {/* Low Stock Items List */}
-            <Text style={styles.sectionHeader}>Critical Low Stock Items</Text>
+            <Text style={styles.sectionHeader}>Station Stock Alerts</Text>
             <View style={{ gap: spacing.xs }}>
               {(data?.low_stock_items && data.low_stock_items.length > 0) ? (
-                data.low_stock_items.map((item) => (
+                data.low_stock_items.map((item) => {
+                  const statusColor = item.status === 'CRITICAL' || item.status === 'OUT OF STOCK'
+                    ? colors.dangerRed
+                    : colors.warningAmber;
+                  return (
                   <View key={item.id} style={{
                     backgroundColor: colors.card,
                     borderRadius: radius.default,
                     borderWidth: 1,
-                    borderColor: colors.dangerRed + '40',
+                    borderColor: `${statusColor}40`,
                     padding: spacing.xs + 2,
                     flexDirection: 'row',
                     alignItems: 'center',
@@ -699,6 +704,9 @@ export default function HomeScreen() {
                       </Text>
                     </View>
                     <View style={{ alignItems: 'flex-end' }}>
+                      <Text style={{ fontFamily: typography.fontFamily.bold, fontSize: 10, color: statusColor }}>
+                        {item.status}
+                      </Text>
                       <Text style={{ fontFamily: typography.fontFamily.bold, fontSize: 13, color: colors.dangerRed }}>
                         {item.quantity} {item.unit}
                       </Text>
@@ -707,7 +715,8 @@ export default function HomeScreen() {
                       </Text>
                     </View>
                   </View>
-                ))
+                  );
+                })
               ) : (
                 <View style={styles.emptyAlertsCard}>
                   <MaterialIcons name="check-circle-outline" size={24} color={colors.okGreen} />

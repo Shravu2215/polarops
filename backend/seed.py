@@ -15,7 +15,7 @@ def seed_database(reset: bool = True):
 
     if reset:
         Base.metadata.drop_all(bind=engine)
-        Base.metadata.create_all(bind=engine)
+    Base.metadata.create_all(bind=engine)
 
     db = SessionLocal()
     try:

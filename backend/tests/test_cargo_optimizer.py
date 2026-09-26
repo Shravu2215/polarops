@@ -51,24 +51,37 @@ class TestCargoOptimizerSuite(unittest.TestCase):
         print("JSON Response:")
         print(json.dumps(res_forecast.json(), indent=2))
 
+        db = next(get_db())
+        u = db.query(models.User).filter(models.User.email == "leader@polarops.in").first()
+        u.role = "Logistics Officer"
+        db.commit()
+
         print("\n==================================================")
         print("2. TESTING CRITICAL DOMINANCE IN CARGO OPTIMIZER")
         print("Proving 2 High items (50+50=100pts) do NOT displace 1 Critical item (1000pts)")
         print("==================================================")
 
         items = [
-            {"title": "Critical Hypothermia Med Kit", "shipment_code": "CRIT-01", "weight_kg": 100, "volume_m3": 1.0, "priority": "Critical", "status": "Pending"},
-            {"title": "High Priority Ration Box 1", "shipment_code": "HIGH-01", "weight_kg": 50, "volume_m3": 0.5, "priority": "High", "status": "Pending"},
-            {"title": "High Priority Ration Box 2", "shipment_code": "HIGH-02", "weight_kg": 50, "volume_m3": 0.5, "priority": "High", "status": "Pending"},
+            {"title": "Critical Oxygen", "shipment_code": "CRIT-01", "supply_name": "Emergency Oxygen Cylinders"},
+            {"title": "High Ration 1", "shipment_code": "HIGH-01", "supply_name": "Dehydrated Ration Packs"},
+            {"title": "High Ration 2", "shipment_code": "HIGH-02", "supply_name": "Dehydrated Ration Packs"},
         ]
 
         for item in items:
-            res_create = self.client.post("/cargo", json=item, headers=headers)
+            res_create = self.client.post("/cargo", json={
+                "shipment_code": item["shipment_code"],
+                "title": item["title"],
+                "weight_kg": 0,
+                "volume_m3": 0,
+                "priority": "Medium",
+                "station_name": "Maitri",
+                "items": [{"supply_name": item["supply_name"], "quantity": 1}],
+            }, headers=headers)
             self.assertEqual(res_create.status_code, 200, f"Failed to create cargo {item['shipment_code']}")
 
         opt_payload = {
-            "capacity_weight_kg": 110,
-            "capacity_volume_m3": 1.1
+            "capacity_weight_kg": 2.5,
+            "capacity_volume_m3": 0.04
         }
         res_opt = self.client.post("/cargo/optimize", json=opt_payload, headers=headers)
         self.assertEqual(res_opt.status_code, 200)
@@ -77,11 +90,12 @@ class TestCargoOptimizerSuite(unittest.TestCase):
         print("JSON Response:")
         print(json.dumps(opt_data, indent=2))
 
-        packed_titles = [i["title"] for i in opt_data["packed_items"]]
-        left_titles = [i["title"] for i in opt_data["left_behind_items"]]
+        packed_titles = [i["supply_name"] for i in opt_data["packed_items"]]
+        left_titles = [i["supply_name"] for i in opt_data["left_behind_items"]]
 
-        self.assertIn("Critical Hypothermia Med Kit", packed_titles, "Critical item MUST be packed!")
-        self.assertTrue("High Priority Ration Box 1" in left_titles and "High Priority Ration Box 2" in left_titles, "High items must NOT displace Critical item!")
+        self.assertIn("Critical Oxygen", packed_titles, "Critical item MUST be packed!")
+        self.assertEqual(left_titles.count("High Ration 1"), 1)
+        self.assertEqual(left_titles.count("High Ration 2"), 1, "High items must NOT displace Critical item!")
         print("-> VERIFIED: Critical item (1000 pts) dominated over two High items (100 pts combined)!")
 
         print("\n==================================================")
@@ -158,6 +172,21 @@ class TestCargoOptimizerSuite(unittest.TestCase):
             requirement_res = self.client.post("/expedition-requirements", json=payload, headers=headers)
             self.assertEqual(requirement_res.status_code, 200, requirement_res.text)
 
+        logistics_res = self.client.post("/users", headers=headers, json={
+            "username": "manifest_logistics",
+            "email": "manifest_logistics@polarops.in",
+            "password": "manifest_test_password_2026",
+            "role": "Logistics Officer",
+            "station_name": "Maitri",
+        })
+        self.assertEqual(logistics_res.status_code, 200, logistics_res.text)
+        logistics_login = self.client.post("/auth/login", json={
+            "email": "manifest_logistics@polarops.in",
+            "password": "manifest_test_password_2026",
+        })
+        self.assertEqual(logistics_login.status_code, 200)
+        logistics_headers = {"Authorization": f"Bearer {logistics_login.json()['access_token']}"}
+
         db.add_all([
             models.InventoryItem(name="Emergency Rations (MRE)", category="Ration", quantity=14, unit="Units", min_required=0, daily_use_per_person=0, location_station="Maitri"),
             models.InventoryItem(name="Emergency Oxygen Cylinders", category="Medical", quantity=4, unit="Cylinders", min_required=0, daily_use_per_person=0, location_station="Maitri"),
@@ -175,7 +204,7 @@ class TestCargoOptimizerSuite(unittest.TestCase):
             "expedition_id": expedition_id,
             "capacity_weight_kg": 120.0,
             "capacity_volume_m3": 4.0,
-        }, headers=headers)
+        }, headers=logistics_headers)
         self.assertEqual(optimize_res.status_code, 200, optimize_res.text)
         optimize_data = optimize_res.json()
         self.assertGreaterEqual(len(optimize_data["packed_items"]), 1)
@@ -188,13 +217,17 @@ class TestCargoOptimizerSuite(unittest.TestCase):
             "vehicle_capacity_weight_kg": 120.0,
             "vehicle_capacity_volume_m3": 4.0,
             "items": optimize_data["packed_items"],
-        }, headers=headers)
+        }, headers=logistics_headers)
         self.assertEqual(manifest_res.status_code, 200, manifest_res.text)
         manifest_data = manifest_res.json()
         self.assertEqual(manifest_data["expedition_id"], expedition_id)
+        self.assertEqual(manifest_data["status"], "Draft")
         self.assertGreater(manifest_data["selected_item_count"], 0)
 
-        persisted = self.client.get(f"/cargo-manifests?expedition_id={expedition_id}", headers=headers)
+        submit_res = self.client.patch(f"/cargo-manifests/{manifest_data['id']}/status", json={"status": "Submitted"}, headers=logistics_headers)
+        self.assertEqual(submit_res.status_code, 200, submit_res.text)
+
+        persisted = self.client.get(f"/cargo-manifests?expedition_id={expedition_id}", headers=logistics_headers)
         self.assertEqual(persisted.status_code, 200)
         self.assertGreater(len(persisted.json()), 0)
 
@@ -205,7 +238,7 @@ class TestCargoOptimizerSuite(unittest.TestCase):
             "vehicle_capacity_weight_kg": 120.0,
             "vehicle_capacity_volume_m3": 4.0,
             "items": [{"supply_name": "Dehydrated Ration Packs", "quantity": 1}],
-        }, headers=headers)
+        }, headers=logistics_headers)
         self.assertEqual(duplicate_res.status_code, 409)
 
         stock_limit_res = self.client.post("/cargo-manifests", json={
@@ -215,7 +248,7 @@ class TestCargoOptimizerSuite(unittest.TestCase):
             "vehicle_capacity_weight_kg": 120.0,
             "vehicle_capacity_volume_m3": 4.0,
             "items": [{"supply_name": "Dehydrated Ration Packs", "quantity": 15}],
-        }, headers=headers)
+        }, headers=logistics_headers)
         self.assertEqual(stock_limit_res.status_code, 400)
 
     def test_simulator_and_priority_sync(self):
@@ -255,6 +288,20 @@ class TestCargoOptimizerSuite(unittest.TestCase):
             "status": "Active"
         }, headers=headers)
         self.assertEqual(exp_res.status_code, 200)
+
+        logistics_user_response = self.client.post("/users", headers=headers, json={
+            "username": "sync_logistics",
+            "email": "sync_logistics@polarops.in",
+            "password": "logistics_test_password_2026",
+            "role": "Logistics Officer",
+            "station_name": "Maitri",
+        })
+        self.assertEqual(logistics_user_response.status_code, 200)
+        logistics_login = self.client.post("/auth/login", json={
+            "email": "sync_logistics@polarops.in",
+            "password": "logistics_test_password_2026",
+        })
+        logistics_headers = {"Authorization": f"Bearer {logistics_login.json()['access_token']}"}
 
         # 2. Add Ration item as Base Admin
         db = next(get_db())
@@ -361,7 +408,9 @@ class TestCargoOptimizerSuite(unittest.TestCase):
             }},
             {"priority": 1, "type": "cargo", "key": "idem-cargo-101", "endpoint": "/cargo", "method": "POST", "body": {
                 "shipment_code": "CRG-TEST", "title": "Medical Oxygen", "weight_kg": 40, "volume_m3": 0.4,
-                "priority": "High", "status": "Pending", "client_timestamp": "2026-09-21T00:00:02Z"
+                "priority": "High", "status": "Pending", "station_name": "Maitri",
+                "items": [{"supply_name": "Emergency Oxygen Cylinders", "quantity": 4}],
+                "client_timestamp": "2026-09-21T00:00:02Z"
             }},
             {"priority": 0, "type": "sos", "key": "idem-sos-101", "endpoint": "/sos", "method": "POST", "body": {
                 "skill_needed": "Medical", "latitude": -70.7660, "longitude": 11.7330, "client_timestamp": "2026-09-21T00:00:03Z"
@@ -377,7 +426,7 @@ class TestCargoOptimizerSuite(unittest.TestCase):
 
         # Execute sorted queue requests to server
         for item in sorted_queue:
-            auth_headers = headers_ba if item["type"] == "inventory" else team_headers if item["type"] == "sos" else headers
+            auth_headers = headers_ba if item["type"] == "inventory" else team_headers if item["type"] == "sos" else logistics_headers
             req_headers = {**auth_headers, "Idempotency-Key": item["key"], "Client-Timestamp": item["body"]["client_timestamp"]}
             r = self.client.post(item["endpoint"], json=item["body"], headers=req_headers)
             self.assertEqual(r.status_code, 200, f"Failed to execute {item['type']}: {r.text}")

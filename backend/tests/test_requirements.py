@@ -35,6 +35,9 @@ class TestRequirementsSuite(unittest.TestCase):
         db.query(models.Vehicle).delete()
         db.query(models.Person).delete()
         db.query(models.User).delete()
+        db.query(models.InventoryMovement).delete()
+        db.query(models.CargoManifest).delete()
+        db.query(models.ExpeditionRequirement).delete()
         db.query(models.InventoryItem).delete()
         db.query(models.CargoShipment).delete()
         db.query(models.Expedition).delete()
@@ -259,6 +262,11 @@ class TestRequirementsSuite(unittest.TestCase):
             "station_name": "Maitri",
         })
         member_headers = {"Authorization": f"Bearer {member_response.json()['access_token']}"}
+        member_id = member_response.json()["user"]["id"]
+        db = next(get_db())
+        expedition = db.query(models.Expedition).filter(models.Expedition.id == expedition_id).first()
+        expedition.assigned_members = [member_id]
+        db.commit()
         member_visible_response = self.client.get(
             f"/expedition-requirements?expedition_id={expedition_id}",
             headers=member_headers,
@@ -295,14 +303,21 @@ class TestRequirementsSuite(unittest.TestCase):
                 expedition_id=manifest_expedition_id,
                 shipment_code=shipment_code,
                 title="Station cargo manifest",
-                status="Packed",
+                status="Approved",
                 vehicle_capacity_weight_kg=100,
                 vehicle_capacity_volume_m3=2,
-                total_weight_kg=1,
-                total_volume_m3=0.1,
+                total_weight_kg=2.5,
+                total_volume_m3=0.04,
                 selected_item_count=1,
-                total_priority_value=5,
-                items_json=[],
+                total_priority_value=1000,
+                items_json=[{
+                    "supply_name": "Emergency Oxygen Cylinders",
+                    "quantity": 1,
+                    "weight_per_unit": 2.5,
+                    "volume_per_unit": 0.04,
+                    "priority": "Critical",
+                    "priority_value": 1000,
+                }],
             ))
         db.commit()
 
@@ -467,6 +482,215 @@ class TestRequirementsSuite(unittest.TestCase):
         dup_resp = self.client.post("/inventory", headers=ba_headers, json=inv_payload)
         self.assertEqual(dup_resp.status_code, 400)
         self.assertIn("already exists", dup_resp.json()["detail"])
+
+    def test_inventory_status_movement_and_inbound_receipt_lifecycle(self):
+        admin_headers = self._create_role_user("stock_admin", "Base Admin", "Maitri")
+        logistics_headers = self._create_role_user("stock_logistics", "Logistics Officer", "Maitri")
+
+        opening_response = self.client.post("/inventory", headers=admin_headers, json={
+            "name": "Emergency Rations (MRE)",
+            "category": "Ration",
+            "quantity": 100,
+            "unit": "Units",
+            "min_required": 50,
+            "daily_use_per_person": 1,
+            "location_station": "Maitri",
+        })
+        self.assertEqual(opening_response.status_code, 200, opening_response.text)
+        inventory_id = opening_response.json()["id"]
+        self.assertEqual(opening_response.json()["opening_quantity"], 100)
+        self.assertEqual(opening_response.json()["status"], "IN STOCK")
+
+        low_stock_response = self.client.put(f"/inventory/{inventory_id}", headers=admin_headers, json={
+            "quantity": 50,
+        })
+        self.assertEqual(low_stock_response.status_code, 200, low_stock_response.text)
+        self.assertEqual(low_stock_response.json()["status"], "LOW STOCK")
+
+        adjustment_response = self.client.put(f"/inventory/{inventory_id}", headers=admin_headers, json={
+            "quantity": 10,
+        })
+        self.assertEqual(adjustment_response.status_code, 200, adjustment_response.text)
+        self.assertEqual(adjustment_response.json()["status"], "CRITICAL")
+
+        consume_response = self.client.post(f"/inventory/{inventory_id}/consume", headers=admin_headers, json={
+            "quantity": 10,
+            "notes": "Field team consumption",
+        })
+        self.assertEqual(consume_response.status_code, 200, consume_response.text)
+        self.assertEqual(consume_response.json()["quantity"], 0)
+        self.assertEqual(consume_response.json()["status"], "OUT OF STOCK")
+        overconsumption = self.client.post(
+            f"/inventory/{inventory_id}/consume",
+            headers=admin_headers,
+            json={"quantity": 1},
+        )
+        self.assertEqual(overconsumption.status_code, 400)
+
+        shipment_response = self.client.post("/cargo", headers=logistics_headers, json={
+            "shipment_code": "INBOUND-RATIONS-1",
+            "title": "Ration delivery",
+            "weight_kg": 0,
+            "volume_m3": 0,
+            "priority": "High",
+            "station_name": "Maitri",
+            "items": [{"supply_name": "Dehydrated Ration Packs", "quantity": 6}],
+        })
+        self.assertEqual(shipment_response.status_code, 200, shipment_response.text)
+        cargo_id = shipment_response.json()["id"]
+        self.assertEqual(self.client.get("/inventory", headers=admin_headers).json()[0]["quantity"], 0)
+
+        in_transit_response = self.client.patch(
+            f"/cargo/{cargo_id}/status", headers=logistics_headers, json={"status": "In-Transit"}
+        )
+        self.assertEqual(in_transit_response.status_code, 200, in_transit_response.text)
+        self.assertEqual(self.client.get("/inventory", headers=admin_headers).json()[0]["quantity"], 0)
+
+        delivered_response = self.client.patch(
+            f"/cargo/{cargo_id}/status", headers=logistics_headers, json={"status": "Delivered"}
+        )
+        self.assertEqual(delivered_response.status_code, 200, delivered_response.text)
+        stock = self.client.get("/inventory", headers=admin_headers).json()[0]
+        self.assertEqual(stock["quantity"], 6)
+        self.assertEqual(stock["status"], "CRITICAL")
+        duplicate_delivery = self.client.patch(
+            f"/cargo/{cargo_id}/status", headers=logistics_headers, json={"status": "Delivered"}
+        )
+        self.assertEqual(duplicate_delivery.status_code, 409)
+
+        movement_response = self.client.get(f"/inventory/{inventory_id}/movements", headers=admin_headers)
+        self.assertEqual(movement_response.status_code, 200)
+        movements = movement_response.json()
+        movement_types = [movement["movement_type"] for movement in movements]
+        self.assertEqual(movement_types.count("ADJUSTED"), 3)
+        self.assertEqual(movement_types.count("CONSUMED"), 1)
+        self.assertEqual(movement_types.count("RECEIVED"), 1)
+        opening_balance = stock["opening_quantity"]
+        net_movements = sum(item["quantity_delta"] for item in movements if item["reference_type"] != "OPENING_STOCK")
+        self.assertEqual(opening_balance + net_movements, stock["quantity"])
+
+    def test_cargo_manifest_approval_and_issue_workflow(self):
+        logistics_headers = self._create_role_user("manifest_logistics", "Logistics Officer", "Maitri")
+        admin_headers = self._create_role_user("manifest_admin", "Base Admin", "Maitri")
+        other_leader_headers = self._create_role_user("bharati_leader", "Expedition Leader", "Bharati")
+        same_station_other_leader_headers = self._create_role_user("other_maitri_leader", "Expedition Leader", "Maitri")
+        member_response = self.client.post("/auth/register", json={
+            "username": "manifest_member",
+            "email": "manifest_member@polarops.in",
+            "password": "password123",
+            "station_name": "Maitri",
+        })
+        member_headers = {"Authorization": f"Bearer {member_response.json()['access_token']}"}
+        member_id = member_response.json()["user"]["id"]
+
+        expedition_response = self.client.post("/expeditions", headers=self.leader_headers, json={
+            "name": "Cargo Approval Expedition",
+            "station_name": "Maitri",
+            "start_date": "2026-11-01",
+            "end_date": "2027-03-01",
+            "assigned_members": [member_id],
+            "status": "Active",
+        })
+        self.assertEqual(expedition_response.status_code, 200, expedition_response.text)
+        expedition_id = expedition_response.json()["id"]
+
+        stock_response = self.client.post("/inventory", headers=admin_headers, json={
+            "name": "Emergency Oxygen Cylinders",
+            "category": "Medical",
+            "quantity": 6,
+            "unit": "Cylinders",
+            "min_required": 2,
+            "daily_use_per_person": 0.1,
+            "location_station": "Maitri",
+        })
+        self.assertEqual(stock_response.status_code, 200, stock_response.text)
+        inventory_id = stock_response.json()["id"]
+
+        requirement_response = self.client.post("/expedition-requirements", headers=self.leader_headers, json={
+            "expedition_id": expedition_id,
+            "supply_name": "Emergency Oxygen Cylinders",
+            "quantity": 5,
+        })
+        self.assertEqual(requirement_response.status_code, 200, requirement_response.text)
+
+        optimize_response = self.client.post("/cargo/optimize", headers=logistics_headers, json={
+            "expedition_id": expedition_id,
+            "capacity_weight_kg": 10,
+            "capacity_volume_m3": 1,
+        })
+        self.assertEqual(optimize_response.status_code, 200, optimize_response.text)
+        optimized_items = optimize_response.json()["packed_items"]
+        self.assertTrue(optimized_items)
+
+        create_response = self.client.post("/cargo-manifests", headers=logistics_headers, json={
+            "expedition_id": expedition_id,
+            "title": "Oxygen Loadout",
+            "shipment_code": "APPROVAL-MANIFEST-1",
+            "vehicle_capacity_weight_kg": 10,
+            "vehicle_capacity_volume_m3": 1,
+            "items": optimized_items,
+        })
+        self.assertEqual(create_response.status_code, 200, create_response.text)
+        manifest_id = create_response.json()["id"]
+        self.assertEqual(create_response.json()["status"], "Draft")
+        self.assertEqual(self.client.get("/inventory", headers=admin_headers).json()[0]["quantity"], 6)
+        self.assertEqual(self.client.get("/cargo-manifests?expedition_id=" + str(expedition_id), headers=member_headers).json(), [])
+
+        submit_response = self.client.patch(f"/cargo-manifests/{manifest_id}/status", headers=logistics_headers, json={"status": "Submitted"})
+        self.assertEqual(submit_response.status_code, 200, submit_response.text)
+        self.assertEqual(self.client.patch(f"/cargo-manifests/{manifest_id}/status", headers=logistics_headers, json={"status": "Approved"}).status_code, 409)
+        self.assertEqual(self.client.patch(f"/cargo-manifests/{manifest_id}/status", headers=admin_headers, json={"status": "Approved"}).status_code, 403)
+        self.assertEqual(self.client.patch(f"/cargo-manifests/{manifest_id}/status", headers=other_leader_headers, json={"status": "Approved"}).status_code, 403)
+        self.assertEqual(self.client.patch(f"/cargo-manifests/{manifest_id}/status", headers=same_station_other_leader_headers, json={"status": "Approved"}).status_code, 403)
+        self.assertEqual(self.client.get("/inventory", headers=admin_headers).json()[0]["quantity"], 6)
+
+        reject_response = self.client.patch(
+            f"/cargo-manifests/{manifest_id}/status",
+            headers=self.leader_headers,
+            json={"status": "Rejected", "rejection_reason": "Reduce the spare cylinder count."},
+        )
+        self.assertEqual(reject_response.status_code, 200, reject_response.text)
+        self.assertEqual(reject_response.json()["rejection_reason"], "Reduce the spare cylinder count.")
+
+        rejected_manifest = next(
+            item for item in self.client.get(f"/cargo-manifests?expedition_id={expedition_id}", headers=logistics_headers).json()
+            if item["id"] == manifest_id
+        )
+        rejected_items = [{"supply_name": "Emergency Oxygen Cylinders", "quantity": 1}]
+        correction_response = self.client.put(f"/cargo-manifests/{manifest_id}", headers=logistics_headers, json={
+            "expedition_id": expedition_id,
+            "title": rejected_manifest["title"],
+            "shipment_code": rejected_manifest["shipment_code"],
+            "vehicle_capacity_weight_kg": 10,
+            "vehicle_capacity_volume_m3": 1,
+            "items": rejected_items,
+        })
+        self.assertEqual(correction_response.status_code, 200, correction_response.text)
+        self.assertEqual(correction_response.json()["status"], "Draft")
+        self.assertEqual(self.client.get("/inventory", headers=admin_headers).json()[0]["quantity"], 6)
+
+        self.assertEqual(self.client.patch(f"/cargo-manifests/{manifest_id}/status", headers=logistics_headers, json={"status": "Submitted"}).status_code, 200)
+        approve_response = self.client.patch(f"/cargo-manifests/{manifest_id}/status", headers=self.leader_headers, json={"status": "Approved"})
+        self.assertEqual(approve_response.status_code, 200, approve_response.text)
+        self.assertEqual(self.client.get("/inventory", headers=admin_headers).json()[0]["quantity"], 6)
+        member_visible = self.client.get(f"/cargo-manifests?expedition_id={expedition_id}", headers=member_headers)
+        self.assertTrue(any(item["id"] == manifest_id for item in member_visible.json()))
+
+        pack_response = self.client.patch(f"/cargo-manifests/{manifest_id}/status", headers=logistics_headers, json={"status": "Packed"})
+        self.assertEqual(pack_response.status_code, 200, pack_response.text)
+        remaining_stock = self.client.get("/inventory", headers=admin_headers).json()[0]["quantity"]
+        self.assertEqual(remaining_stock, 5)
+        issued_movements = self.client.get(f"/inventory/{inventory_id}/movements", headers=admin_headers).json()
+        self.assertTrue(any(item["movement_type"] == "ISSUED" and item["quantity_delta"] == -1 for item in issued_movements))
+
+        self.assertEqual(self.client.put(f"/cargo-manifests/{manifest_id}", headers=logistics_headers, json={
+            "expedition_id": expedition_id,
+            "title": "Changed after approval",
+            "shipment_code": "APPROVAL-MANIFEST-1",
+            "vehicle_capacity_weight_kg": 10,
+            "vehicle_capacity_volume_m3": 1,
+            "items": rejected_items,
+        }).status_code, 409)
 
     def test_sos_persistence_role_visibility_idempotency_and_status_history(self):
         member_response = self.client.post("/auth/register", json={

@@ -29,6 +29,19 @@ interface StationStockItem {
   unit: string;
   min_required: number;
   location_station: string;
+  opening_quantity?: number;
+  status: 'IN STOCK' | 'LOW STOCK' | 'CRITICAL' | 'OUT OF STOCK';
+}
+
+interface InventoryMovement {
+  id: number;
+  movement_type: string;
+  quantity_delta: number;
+  quantity_after: number;
+  reference_type: string | null;
+  reference_id: number | null;
+  notes: string | null;
+  created_at: string | null;
 }
 
 interface ExpeditionOption {
@@ -70,6 +83,8 @@ export default function InventoryScreen() {
   const [showAddModal, setShowAddModal] = useState<boolean>(false);
   const [submitting, setSubmitting] = useState<boolean>(false);
   const [stationStock, setStationStock] = useState<StationStockItem[]>([]);
+  const [stations, setStations] = useState<string[]>([]);
+  const [showStationPicker, setShowStationPicker] = useState<boolean>(false);
   const [expeditions, setExpeditions] = useState<ExpeditionOption[]>([]);
   const [selectedExpeditionId, setSelectedExpeditionId] = useState<number | null>(null);
   const [catalogItems, setCatalogItems] = useState<SupplyCatalogItem[]>([]);
@@ -82,6 +97,11 @@ export default function InventoryScreen() {
   const [showEditModal, setShowEditModal] = useState<boolean>(false);
   const [selectedEditItem, setSelectedEditItem] = useState<StationStockItem | null>(null);
   const [editSubmitting, setEditSubmitting] = useState<boolean>(false);
+  const [consumeQuantity, setConsumeQuantity] = useState<string>('');
+  const [consumeSubmitting, setConsumeSubmitting] = useState<boolean>(false);
+  const [movementItem, setMovementItem] = useState<StationStockItem | null>(null);
+  const [movementHistory, setMovementHistory] = useState<InventoryMovement[]>([]);
+  const [movementHistoryLoading, setMovementHistoryLoading] = useState<boolean>(false);
   const [operationsLoading, setOperationsLoading] = useState<boolean>(true);
   const [requirementsLoading, setRequirementsLoading] = useState<boolean>(false);
   const [requirementSubmitting, setRequirementSubmitting] = useState<boolean>(false);
@@ -133,25 +153,36 @@ export default function InventoryScreen() {
     const headers = { Authorization: `Bearer ${token}` };
 
     try {
-      const [inventoryResponse, catalogResponse, cargoResponse, expeditionResponse] = await Promise.all([
+      const [inventoryResponse, catalogResponse, cargoResponse, expeditionResponse, stationsResponse] = await Promise.all([
         fetch(`${BACKEND_URL}/inventory`, { headers }),
         fetch(`${BACKEND_URL}/supply-catalog`, { headers }),
         fetch(`${BACKEND_URL}/cargo`, { headers }),
         fetch(`${BACKEND_URL}/expeditions`, { headers }),
+        fetch(`${BACKEND_URL}/stations`, { headers }),
       ]);
-      const failedResponse = [inventoryResponse, catalogResponse, cargoResponse, expeditionResponse]
+      const failedResponse = [inventoryResponse, catalogResponse, cargoResponse, expeditionResponse, stationsResponse]
         .find((response) => !response.ok);
       if (failedResponse) {
         throw new Error(`Inventory data request failed (${failedResponse.status})`);
       }
 
-      const [stockResult, catalogResult, shipmentResult, expeditionResult] = await Promise.all([
+      const [stockResult, catalogResult, shipmentResult, expeditionResult, stationResult] = await Promise.all([
         inventoryResponse.json() as Promise<StationStockItem[]>,
         catalogResponse.json() as Promise<SupplyCatalogItem[]>,
         cargoResponse.json() as Promise<ShipmentItem[]>,
         expeditionResponse.json() as Promise<ExpeditionOption[]>,
+        stationsResponse.json() as Promise<Array<{ name: string }>>,
       ]);
+      const stationNames = stationResult.map((station) => station.name);
       setStationStock(stockResult);
+      setStations(stationNames);
+      setStationName((current) => (
+        stationNames.includes(current)
+          ? current
+          : stationNames.includes(user?.station_name || '')
+            ? user!.station_name
+            : (stationNames[0] || '')
+      ));
       setCatalogItems(catalogResult);
       setShipments(shipmentResult);
       setExpeditions(expeditionResult);
@@ -237,7 +268,56 @@ export default function InventoryScreen() {
     setSelectedEditItem(item);
     setQuantity(item.quantity.toString());
     setMinReq(item.min_required.toString());
+    setConsumeQuantity('');
     setShowEditModal(true);
+  };
+
+  const handleConsumeStock = async () => {
+    if (!selectedEditItem) return;
+    const amount = Number(consumeQuantity);
+    if (!Number.isFinite(amount) || amount <= 0) {
+      Alert.alert('Quantity required', 'Enter a consumption quantity greater than zero.');
+      return;
+    }
+    if (syncStatus === 'Offline') {
+      Alert.alert('Connection required', 'Consumption must be recorded online to update the station ledger.');
+      return;
+    }
+    setConsumeSubmitting(true);
+    try {
+      const response = await fetch(`${BACKEND_URL}/inventory/${selectedEditItem.id}/consume`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ quantity: amount }),
+      });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.detail || 'Unable to record consumption.');
+      setConsumeQuantity('');
+      await fetchOperationalData();
+      Alert.alert('Consumption recorded', `Available stock: ${result.quantity} ${selectedEditItem.unit} (${result.status}).`);
+    } catch (error) {
+      Alert.alert('Consumption failed', error instanceof Error ? error.message : 'Unable to record stock consumption.');
+    } finally {
+      setConsumeSubmitting(false);
+    }
+  };
+
+  const handleLoadMovementHistory = async (item: StationStockItem) => {
+    setMovementItem(item);
+    setMovementHistoryLoading(true);
+    try {
+      const response = await fetch(`${BACKEND_URL}/inventory/${item.id}/movements`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.detail || 'Unable to load stock history.');
+      setMovementHistory(result);
+    } catch (error) {
+      Alert.alert('History unavailable', error instanceof Error ? error.message : 'Unable to load stock history.');
+      setMovementItem(null);
+    } finally {
+      setMovementHistoryLoading(false);
+    }
   };
 
   const handleUpdateStock = async () => {
@@ -249,7 +329,7 @@ export default function InventoryScreen() {
     };
 
     if (syncStatus === 'Offline') {
-      await addToQueue(`inventory_update_${selectedEditItem.id}`, itemPayload, 2, `/inventory/${selectedEditItem.id}`, 'PUT');
+      await addToQueue('inventory_update', itemPayload, 2, `/inventory/${selectedEditItem.id}`, 'PUT');
       Alert.alert('Saved to Queue', 'Update saved on device. It will be synced when connected.');
       setShowEditModal(false);
       setEditSubmitting(false);
@@ -286,6 +366,10 @@ export default function InventoryScreen() {
       Alert.alert('Validation Error', 'Please select a catalog item.');
       return;
     }
+    if (!stations.includes(stationName)) {
+      Alert.alert('Station Required', 'Select a station from the available station list.');
+      return;
+    }
 
     setSubmitting(true);
     const itemPayload = {
@@ -295,7 +379,7 @@ export default function InventoryScreen() {
       unit: selectedCatalogItem.unit,
       min_required: parseFloat(minReq) || 0,
       daily_use_per_person: parseFloat(dailyUse) || selectedCatalogItem.default_daily_use,
-      location_station: stationName.trim() || user?.station_name || 'Maitri',
+      location_station: stationName,
       cold_factor_sensitivity: parseFloat(sensitivity) || selectedCatalogItem.cold_sensitivity,
     };
 
@@ -435,7 +519,9 @@ export default function InventoryScreen() {
               {operationsLoading && stationStock.length === 0 ? (
                 <ActivityIndicator size="small" color={colors.primary} />
               ) : stationStockItems.length > 0 ? stationStockItems.map((item) => {
-                const isLowStock = item.quantity <= item.min_required;
+                const isHealthy = item.status === 'IN STOCK';
+                const isCritical = item.status === 'CRITICAL' || item.status === 'OUT OF STOCK';
+                const stockStatusColor = isHealthy ? colors.okGreen : isCritical ? colors.dangerRed : colors.warningAmber;
                 return (
                   <View key={item.id} style={{
                     backgroundColor: colors.background,
@@ -454,20 +540,23 @@ export default function InventoryScreen() {
                       </View>
                       <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
                         <View style={{
-                          backgroundColor: isLowStock ? '#FEF2F2' : '#DCFCE7',
+                          backgroundColor: `${stockStatusColor}18`,
                           paddingHorizontal: spacing.xs,
                           paddingVertical: 3,
                           borderRadius: radius.pill,
                         }}>
-                          <Text style={{ fontFamily: typography.fontFamily.bold, fontSize: 10, color: isLowStock ? colors.dangerRed : colors.okGreen }}>
-                            {isLowStock ? 'LOW STOCK' : 'IN STOCK'}
+                          <Text style={{ fontFamily: typography.fontFamily.bold, fontSize: 10, color: stockStatusColor }}>
+                            {item.status}
                           </Text>
                         </View>
-                        {isWriteAllowed && (
-                          <TouchableOpacity onPress={() => handleOpenEdit(item)} style={{ padding: 4 }}>
+                        <TouchableOpacity onPress={() => void handleLoadMovementHistory(item)} style={{ padding: 4 }} accessibilityLabel={`Stock history for ${item.name}`}>
+                          <MaterialIcons name="history" size={18} color={colors.secondaryText} />
+                        </TouchableOpacity>
+                        {isWriteAllowed ? (
+                          <TouchableOpacity onPress={() => handleOpenEdit(item)} style={{ padding: 4 }} accessibilityLabel={`Adjust ${item.name}`}>
                             <MaterialIcons name="edit" size={18} color={colors.primary} />
                           </TouchableOpacity>
-                        )}
+                        ) : null}
                       </View>
                     </View>
                     <View style={{ flexDirection: 'row', justifyContent: 'space-between', flexWrap: 'wrap', gap: spacing.xs }}>
@@ -720,7 +809,35 @@ export default function InventoryScreen() {
             </View>
 
             <Text style={styles.fieldLabel}>Station Name</Text>
-            <TextInput style={styles.input} value={stationName} onChangeText={setStationName} placeholder="Maitri" />
+            <TouchableOpacity
+              style={[styles.input, styles.stationPickerButton]}
+              onPress={() => setShowStationPicker((visible) => !visible)}
+              disabled={stations.length === 0}
+              accessibilityRole="button"
+              accessibilityLabel={`Station: ${stationName || 'Choose a station'}`}
+            >
+              <Text style={styles.stationPickerText}>{stationName || 'Choose a station'}</Text>
+              <MaterialIcons name={showStationPicker ? 'expand-less' : 'expand-more'} size={20} color={colors.secondaryText} />
+            </TouchableOpacity>
+            {showStationPicker ? (
+              <View style={styles.stationOptions}>
+                {stations.map((station) => (
+                  <TouchableOpacity
+                    key={station}
+                    style={[styles.stationOption, stationName === station && styles.stationOptionSelected]}
+                    onPress={() => {
+                      setStationName(station);
+                      setShowStationPicker(false);
+                    }}
+                    accessibilityRole="button"
+                    accessibilityLabel={`Select ${station}`}
+                  >
+                    <Text style={styles.stationPickerText}>{station}</Text>
+                    {stationName === station ? <MaterialIcons name="check" size={18} color={colors.primary} /> : null}
+                  </TouchableOpacity>
+                ))}
+              </View>
+            ) : null}
 
             <TouchableOpacity style={styles.submitBtn} onPress={handleAddStock} disabled={submitting}>
               {submitting ? <ActivityIndicator color={colors.white} /> : <Text style={styles.submitBtnText}>ADD TO INVENTORY LEDGER</Text>}
@@ -801,7 +918,58 @@ export default function InventoryScreen() {
             <TouchableOpacity style={styles.submitBtn} onPress={handleUpdateStock} disabled={editSubmitting}>
               {editSubmitting ? <ActivityIndicator color={colors.white} /> : <Text style={styles.submitBtnText}>UPDATE ITEM</Text>}
             </TouchableOpacity>
+
+            <View style={{ borderTopWidth: 1, borderTopColor: colors.cardBorder, paddingTop: spacing.sm, gap: spacing.xs }}>
+              <Text style={styles.sectionTitle}>Record Consumption</Text>
+              <TextInput
+                style={styles.input}
+                value={consumeQuantity}
+                onChangeText={setConsumeQuantity}
+                keyboardType="decimal-pad"
+                placeholder={`Quantity (${selectedEditItem?.unit || 'units'})`}
+              />
+              <TouchableOpacity style={styles.secondaryButton} onPress={() => void handleConsumeStock()} disabled={consumeSubmitting}>
+                {consumeSubmitting ? <ActivityIndicator color={colors.primary} /> : <Text style={styles.secondaryButtonText}>RECORD CONSUMPTION</Text>}
+              </TouchableOpacity>
+            </View>
           </ScrollView>
+        </View>
+      </Modal>
+
+      <Modal visible={movementItem !== null} animationType="slide" transparent onRequestClose={() => setMovementItem(null)}>
+        <View style={styles.modalOverlay}>
+          <View style={[styles.modalCard, { maxHeight: '85%' }]}>
+            <View style={styles.modalHeader}>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.modalTitle}>Stock Movement History</Text>
+                <Text style={styles.itemCategory}>{movementItem?.name}</Text>
+              </View>
+              <TouchableOpacity onPress={() => setMovementItem(null)} accessibilityLabel="Close stock history">
+                <MaterialIcons name="close" size={24} color={colors.text} />
+              </TouchableOpacity>
+            </View>
+            {movementHistoryLoading ? (
+              <ActivityIndicator color={colors.primary} />
+            ) : movementHistory.length === 0 ? (
+              <Text style={styles.emptySub}>No stock movements recorded yet.</Text>
+            ) : (
+              <ScrollView>
+                {movementHistory.map((movement) => (
+                  <View key={movement.id} style={styles.movementRow}>
+                    <View style={{ flex: 1 }}>
+                      <Text style={styles.itemName}>{movement.movement_type}</Text>
+                      <Text style={styles.itemCategory}>{movement.notes || movement.reference_type || 'Stock movement'}</Text>
+                      <Text style={styles.itemCategory}>{movement.created_at ? new Date(movement.created_at).toLocaleString() : ''}</Text>
+                    </View>
+                    <View style={{ alignItems: 'flex-end' }}>
+                      <Text style={styles.itemName}>{movement.quantity_delta > 0 ? '+' : ''}{movement.quantity_delta}</Text>
+                      <Text style={styles.itemCategory}>Balance: {movement.quantity_after}</Text>
+                    </View>
+                  </View>
+                ))}
+              </ScrollView>
+            )}
+          </View>
         </View>
       </Modal>
     </SafeAreaView>
@@ -852,6 +1020,35 @@ const styles = StyleSheet.create({
     fontSize: typography.fontSize.sm,
     color: colors.text,
   },
+  stationPickerButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    minHeight: 42,
+  },
+  stationPickerText: {
+    flex: 1,
+    fontFamily: typography.fontFamily.medium,
+    fontSize: typography.fontSize.sm,
+    color: colors.text,
+  },
+  stationOptions: {
+    borderWidth: 1,
+    borderColor: colors.cardBorder,
+    borderRadius: radius.button,
+    overflow: 'hidden',
+  },
+  stationOption: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: spacing.sm,
+    paddingVertical: spacing.sm,
+    backgroundColor: colors.background,
+    borderBottomWidth: 1,
+    borderBottomColor: colors.cardBorder,
+  },
+  stationOptionSelected: { backgroundColor: colors.primaryIce },
   catSelectRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 6, marginVertical: 4 },
   catSelectChip: {
     paddingHorizontal: spacing.sm,
@@ -864,6 +1061,22 @@ const styles = StyleSheet.create({
   catSelectChipActive: { backgroundColor: colors.primary, borderColor: colors.primary },
   catSelectText: { fontFamily: typography.fontFamily.medium, fontSize: 11, color: colors.text },
   catSelectTextActive: { color: colors.white, fontFamily: typography.fontFamily.bold },
+  secondaryButton: {
+    backgroundColor: colors.primaryIce,
+    borderRadius: radius.button,
+    paddingVertical: spacing.sm,
+    alignItems: 'center',
+  },
+  secondaryButtonText: { color: colors.primary, fontFamily: typography.fontFamily.bold, fontSize: typography.fontSize.xs },
+  movementRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: spacing.sm,
+    paddingVertical: spacing.sm,
+    borderBottomWidth: 1,
+    borderBottomColor: colors.cardBorder,
+  },
   submitBtn: {
     backgroundColor: colors.primary,
     borderRadius: radius.button,

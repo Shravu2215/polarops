@@ -20,6 +20,7 @@ from auth_utils import (
     create_access_token,
     get_current_user,
     require_leader,
+    require_logistics_officer,
     require_write_role,
     require_base_admin,
 )
@@ -71,6 +72,70 @@ def save_idempotency(request: Request, response_status: int, response_body: Any,
             db.add(record)
             db.commit()
 
+def inventory_status(quantity: float, min_required: float) -> str:
+    if quantity <= 0:
+        return "OUT OF STOCK"
+    if min_required > 0 and quantity <= min_required * 0.25:
+        return "CRITICAL"
+    if quantity <= min_required:
+        return "LOW STOCK"
+    return "IN STOCK"
+
+def _record_inventory_movement(
+    db: Session,
+    item: models.InventoryItem,
+    movement_type: str,
+    quantity_delta: float,
+    current_user: models.User,
+    reference_type: Optional[str] = None,
+    reference_id: Optional[int] = None,
+    notes: Optional[str] = None,
+) -> models.InventoryMovement:
+    new_quantity = float(item.quantity) + float(quantity_delta)
+    if new_quantity < 0:
+        raise HTTPException(status_code=400, detail=f"Insufficient stock for {item.name}")
+
+    item.quantity = new_quantity
+    item.status = inventory_status(item.quantity, item.min_required)
+    movement = models.InventoryMovement(
+        inventory_item_id=item.id,
+        movement_type=movement_type,
+        quantity_delta=quantity_delta,
+        quantity_after=item.quantity,
+        station_name=item.location_station,
+        reference_type=reference_type,
+        reference_id=reference_id,
+        notes=notes,
+        performed_by_user_id=current_user.id,
+    )
+    db.add(movement)
+
+    last_log = db.query(AuditLog).order_by(AuditLog.id.desc()).first()
+    previous_hash = last_log.hash if last_log else ("0" * 64)
+    timestamp = datetime.now(timezone.utc)
+    payload = {
+        "inventory_item_id": item.id,
+        "movement_type": movement_type,
+        "quantity_delta": quantity_delta,
+        "quantity_after": item.quantity,
+        "station_name": item.location_station,
+        "reference_type": reference_type,
+        "reference_id": reference_id,
+        "notes": notes,
+    }
+    action = f"INVENTORY_{movement_type}"
+    db.add(AuditLog(
+        action=action,
+        performed_by=current_user.username,
+        target_resource=f"INVENTORY-{item.id}",
+        payload=AuditLog.serialize_payload(payload),
+        timestamp=timestamp,
+        prev_hash=previous_hash,
+        hash=AuditLog.compute_hash(action, current_user.username, f"INVENTORY-{item.id}", payload, timestamp, previous_hash),
+    ))
+    db.flush()
+    return movement
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     Base.metadata.create_all(bind=engine)
@@ -82,11 +147,76 @@ async def lifespan(app: FastAPI):
         "request_status": "VARCHAR(32)",
         "is_active": "BOOLEAN NOT NULL DEFAULT TRUE",
     }
+    inventory_columns = {column["name"] for column in inspect(engine).get_columns("inventory_items")}
+    inventory_migrations = {
+        "opening_quantity": "FLOAT NOT NULL DEFAULT 0",
+        "status": "VARCHAR(32) NOT NULL DEFAULT 'IN STOCK'",
+    }
+    cargo_columns = {column["name"] for column in inspect(engine).get_columns("cargo_shipments")}
+    cargo_migrations = {
+        "station_name": "VARCHAR",
+        "direction": "VARCHAR(16) NOT NULL DEFAULT 'Inbound'",
+        "items_json": "JSON NOT NULL DEFAULT '[]'",
+    }
+    cargo_manifest_columns = {column["name"] for column in inspect(engine).get_columns("cargo_manifests")}
+    cargo_manifest_migrations = {
+        "submitted_at": "DATETIME",
+        "reviewed_by_user_id": "INTEGER",
+        "reviewed_at": "DATETIME",
+        "rejection_reason": "VARCHAR",
+    }
+    expedition_columns = {column["name"] for column in inspect(engine).get_columns("expeditions")}
     with engine.begin() as connection:
         for column_name, column_type in vehicle_migrations.items():
             if column_name not in vehicle_columns:
                 connection.execute(text(f"ALTER TABLE vehicles ADD COLUMN {column_name} {column_type}"))
+        for column_name, column_type in inventory_migrations.items():
+            if column_name not in inventory_columns:
+                connection.execute(text(f"ALTER TABLE inventory_items ADD COLUMN {column_name} {column_type}"))
+                if column_name == "opening_quantity":
+                    connection.execute(text("UPDATE inventory_items SET opening_quantity = quantity"))
+        for column_name, column_type in cargo_migrations.items():
+            if column_name not in cargo_columns:
+                connection.execute(text(f"ALTER TABLE cargo_shipments ADD COLUMN {column_name} {column_type}"))
+        for column_name, column_type in cargo_manifest_migrations.items():
+            if column_name not in cargo_manifest_columns:
+                connection.execute(text(f"ALTER TABLE cargo_manifests ADD COLUMN {column_name} {column_type}"))
+        if "leader_user_id" not in expedition_columns:
+            connection.execute(text("ALTER TABLE expeditions ADD COLUMN leader_user_id INTEGER"))
+        connection.execute(text("""
+            UPDATE inventory_items
+            SET status = CASE
+                WHEN quantity <= 0 THEN 'OUT OF STOCK'
+                WHEN min_required > 0 AND quantity <= min_required * 0.25 THEN 'CRITICAL'
+                WHEN quantity <= min_required THEN 'LOW STOCK'
+                ELSE 'IN STOCK'
+            END
+        """))
         connection.execute(text("UPDATE vehicles SET status = 'In Use' WHERE status IN ('On-Mission', 'Dispatched')"))
+    db_scope = get_db()
+    db = next(db_scope)
+    try:
+        inventory_items = db.query(models.InventoryItem).all()
+        for item in inventory_items:
+            has_opening_movement = db.query(models.InventoryMovement.id).filter(
+                models.InventoryMovement.inventory_item_id == item.id,
+                models.InventoryMovement.reference_type == "OPENING_STOCK",
+            ).first()
+            if not has_opening_movement:
+                db.add(models.InventoryMovement(
+                    inventory_item_id=item.id,
+                    movement_type="ADJUSTED",
+                    quantity_delta=0,
+                    quantity_after=item.quantity,
+                    station_name=item.location_station,
+                    reference_type="OPENING_STOCK",
+                    reference_id=item.id,
+                    notes="Opening balance migrated from existing station stock",
+                ))
+        db.commit()
+    finally:
+        db.close()
+        db_scope.close()
     yield
 
 app = FastAPI(
@@ -174,7 +304,17 @@ class CreateCargoRequest(BaseModel):
     priority: str  # Critical, High, Medium, Low
     status: Optional[str] = "Pending"
     expedition_id: Optional[int] = None
+    station_name: Optional[str] = None
+    items: Optional[List["CargoShipmentItemRequest"]] = None
     client_timestamp: Optional[str] = None
+
+class CargoShipmentItemRequest(BaseModel):
+    supply_name: str
+    quantity: int
+
+class ConsumeInventoryRequest(BaseModel):
+    quantity: float
+    notes: Optional[str] = None
 
 class CargoManifestItemRequest(BaseModel):
     supply_name: str
@@ -192,7 +332,11 @@ class CreateCargoManifestRequest(BaseModel):
     vehicle_capacity_weight_kg: float
     vehicle_capacity_volume_m3: float
     items: List[CargoManifestItemRequest]
-    status: Optional[str] = "Packed"
+    status: Optional[str] = "Draft"
+
+class CargoManifestStatusRequest(BaseModel):
+    status: str
+    rejection_reason: Optional[str] = None
 
 class UpdateCargoStatusRequest(BaseModel):
     status: str
@@ -634,6 +778,7 @@ def create_expedition(
         longitude=final_lon,
         start_date=start_d,
         end_date=end_d,
+        leader_user_id=current_user.id,
         status=req.status or "Active",
         target_team_size=calculated_team_size,
         assigned_members=assigned
@@ -890,6 +1035,8 @@ def create_inventory_item(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Supply '{req.name}' already exists in {req.location_station} station inventory. Please update the existing stock level instead."
         )
+    if req.quantity < 0 or req.min_required < 0:
+        raise HTTPException(status_code=400, detail="Opening stock and minimum quantity cannot be negative")
 
     client_ts, received_at = extract_timestamps(request, req.client_timestamp)
 
@@ -897,6 +1044,8 @@ def create_inventory_item(
         name=req.name.strip(),
         category=req.category,
         quantity=req.quantity,
+        opening_quantity=req.quantity,
+        status=inventory_status(0, req.min_required),
         unit=req.unit,
         min_required=req.min_required,
         daily_use_per_person=req.daily_use_per_person,
@@ -905,6 +1054,16 @@ def create_inventory_item(
         last_client_timestamp=client_ts
     )
     db.add(item)
+    db.flush()
+    _record_inventory_movement(
+        db,
+        item,
+        "ADJUSTED",
+        0,
+        current_user,
+        reference_type="OPENING_STOCK",
+        notes="Opening stock balance",
+    )
     db.commit()
     db.refresh(item)
 
@@ -916,6 +1075,8 @@ def create_inventory_item(
         "item_id": item.id,
         "name": item.name,
         "quantity": item.quantity,
+        "opening_quantity": item.opening_quantity,
+        "status": item.status,
         "client_timestamp": client_ts,
         "received_at": received_at
     }
@@ -938,6 +1099,8 @@ def create_inventory_item(
         "name": item.name,
         "category": item.category,
         "quantity": item.quantity,
+        "opening_quantity": item.opening_quantity,
+        "status": item.status,
         "unit": item.unit,
         "min_required": item.min_required,
         "daily_use_per_person": item.daily_use_per_person,
@@ -963,6 +1126,14 @@ def update_inventory_item(
     item = db.query(models.InventoryItem).filter(models.InventoryItem.id == item_id).first()
     if not item:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Inventory item not found")
+    if item.location_station != current_user.station_name:
+        raise HTTPException(status_code=403, detail="Inventory item is outside your assigned station")
+    if req.quantity is not None and req.quantity < 0:
+        raise HTTPException(status_code=400, detail="Inventory quantity cannot be negative")
+    if req.min_required is not None and req.min_required < 0:
+        raise HTTPException(status_code=400, detail="Minimum stock threshold cannot be negative")
+    if req.location_station is not None and req.location_station != current_user.station_name:
+        raise HTTPException(status_code=403, detail="Inventory item cannot be moved outside your assigned station")
 
     # Conflict Resolution: Last-Write-Wins by client_timestamp
     if item.last_client_timestamp and client_ts < item.last_client_timestamp:
@@ -981,8 +1152,6 @@ def update_inventory_item(
         return res
 
     overwritten_value = item.quantity
-    if req.quantity is not None:
-        item.quantity = req.quantity
     if req.name is not None:
         item.name = req.name
     if req.category is not None:
@@ -997,6 +1166,21 @@ def update_inventory_item(
         item.location_station = req.location_station
     if req.cold_factor_sensitivity is not None:
         item.cold_factor_sensitivity = req.cold_factor_sensitivity
+    if req.quantity is not None:
+        adjustment = float(req.quantity) - float(item.quantity)
+        if adjustment:
+            _record_inventory_movement(
+                db,
+                item,
+                "ADJUSTED",
+                adjustment,
+                current_user,
+                reference_type="INVENTORY_ADJUSTMENT",
+                reference_id=item.id,
+                notes="Base Admin stock adjustment",
+            )
+    else:
+        item.status = inventory_status(item.quantity, item.min_required)
     item.last_client_timestamp = client_ts
 
     db.commit()
@@ -1030,6 +1214,8 @@ def update_inventory_item(
         "name": item.name,
         "category": item.category,
         "quantity": item.quantity,
+        "opening_quantity": item.opening_quantity,
+        "status": item.status,
         "unit": item.unit,
         "min_required": item.min_required,
         "daily_use_per_person": item.daily_use_per_person,
@@ -1038,32 +1224,135 @@ def update_inventory_item(
     save_idempotency(request, 200, res, db)
     return res
 
+@app.post("/inventory/{item_id}/consume")
+def consume_inventory_item(
+    item_id: int,
+    req: ConsumeInventoryRequest,
+    current_user: models.User = Depends(require_base_admin),
+    db: Session = Depends(get_db),
+):
+    if req.quantity <= 0:
+        raise HTTPException(status_code=400, detail="Consumption quantity must be greater than zero")
+    item = db.query(models.InventoryItem).filter(models.InventoryItem.id == item_id).first()
+    if not item:
+        raise HTTPException(status_code=404, detail="Inventory item not found")
+    if item.location_station != current_user.station_name:
+        raise HTTPException(status_code=403, detail="Inventory item is outside your assigned station")
+    movement = _record_inventory_movement(
+        db,
+        item,
+        "CONSUMED",
+        -float(req.quantity),
+        current_user,
+        reference_type="CONSUMPTION",
+        reference_id=item.id,
+        notes=req.notes,
+    )
+    db.commit()
+    db.refresh(item)
+    return {
+        "item_id": item.id,
+        "quantity": item.quantity,
+        "status": item.status,
+        "movement_id": movement.id,
+    }
+
 @app.get("/inventory")
 def get_inventory(current_user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
     return db.query(models.InventoryItem).order_by(models.InventoryItem.id.asc()).all()
+
+@app.get("/inventory/{item_id}/movements")
+def get_inventory_movements(
+    item_id: int,
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    item = db.query(models.InventoryItem).filter(models.InventoryItem.id == item_id).first()
+    if not item:
+        raise HTTPException(status_code=404, detail="Inventory item not found")
+    if current_user.role not in {"Base Admin", "Logistics Officer", "Expedition Leader", "Team Member"}:
+        raise HTTPException(status_code=403, detail="Role cannot view inventory movement history")
+    if item.location_station != current_user.station_name:
+        raise HTTPException(status_code=403, detail="Inventory item is outside your assigned station")
+    movements = db.query(models.InventoryMovement).filter(
+        models.InventoryMovement.inventory_item_id == item_id
+    ).order_by(models.InventoryMovement.id.desc()).all()
+    return [{
+        "id": movement.id,
+        "inventory_item_id": movement.inventory_item_id,
+        "movement_type": movement.movement_type,
+        "quantity_delta": movement.quantity_delta,
+        "quantity_after": movement.quantity_after,
+        "station_name": movement.station_name,
+        "reference_type": movement.reference_type,
+        "reference_id": movement.reference_id,
+        "notes": movement.notes,
+        "performed_by_user_id": movement.performed_by_user_id,
+        "created_at": movement.created_at.isoformat() if movement.created_at else None,
+    } for movement in movements]
 
 # --- Cargo CRUD ---
 @app.post("/cargo")
 def create_cargo(
     req: CreateCargoRequest,
     request: Request,
-    current_user: models.User = Depends(require_write_role),
+    current_user: models.User = Depends(require_logistics_officer),
     db: Session = Depends(get_db)
 ):
     cached = check_idempotency(request, db)
     if cached:
         return cached
 
+    if not req.shipment_code.strip() or not req.title.strip():
+        raise HTTPException(status_code=400, detail="Shipment code and title are required")
+    if db.query(models.CargoShipment).filter(models.CargoShipment.shipment_code == req.shipment_code.strip()).first():
+        raise HTTPException(status_code=409, detail="Shipment code already exists")
+    if not req.items:
+        raise HTTPException(status_code=400, detail="Shipment requires catalog-backed supply items")
+
+    expedition = None
+    if req.expedition_id is not None:
+        expedition = db.query(models.Expedition).filter(models.Expedition.id == req.expedition_id).first()
+        if not expedition:
+            raise HTTPException(status_code=404, detail="Expedition not found")
+        if expedition.station_name != current_user.station_name:
+            raise HTTPException(status_code=403, detail="Shipment expedition is outside your assigned station")
+    station_name = req.station_name or (expedition.station_name if expedition else current_user.station_name)
+    if station_name != current_user.station_name:
+        raise HTTPException(status_code=403, detail="Shipment station is outside your assigned station")
+
+    items = []
+    total_weight = 0.0
+    total_volume = 0.0
+    for request_item in req.items:
+        quantity = int(request_item.quantity)
+        if quantity <= 0:
+            raise HTTPException(status_code=400, detail="Shipment item quantities must be greater than zero")
+        metadata = _supply_metadata_for(request_item.supply_name)
+        items.append({
+            "supply_name": request_item.supply_name,
+            "quantity": quantity,
+            "weight_per_unit": metadata["weight_per_unit"],
+            "volume_per_unit": metadata["volume_per_unit"],
+            "priority": metadata["priority"],
+            "priority_value": metadata["priority_value"],
+        })
+        total_weight += quantity * metadata["weight_per_unit"]
+        total_volume += quantity * metadata["volume_per_unit"]
+
     client_ts, received_at = extract_timestamps(request, req.client_timestamp)
 
     cargo = models.CargoShipment(
-        shipment_code=req.shipment_code,
-        title=req.title,
-        weight_kg=req.weight_kg,
-        volume_m3=req.volume_m3,
-        priority=req.priority,
-        status=req.status or "Pending",
-        expedition_id=req.expedition_id
+        shipment_code=req.shipment_code.strip(),
+        title=req.title.strip(),
+        weight_kg=round(total_weight, 2),
+        volume_m3=round(total_volume, 3),
+        priority=max((item["priority"] for item in items), key=lambda value: PRIORITY_WEIGHTS[value]),
+        status="Pending",
+        expedition_id=req.expedition_id,
+        station_name=station_name,
+        direction="Inbound",
+        items_json=items,
     )
     db.add(cargo)
     db.commit()
@@ -1102,7 +1391,10 @@ def create_cargo(
         "weight_kg": cargo.weight_kg,
         "volume_m3": cargo.volume_m3,
         "priority": cargo.priority,
-        "status": cargo.status
+        "status": cargo.status,
+        "station_name": cargo.station_name,
+        "direction": cargo.direction,
+        "items": cargo.items_json,
     }
     save_idempotency(request, 200, res, db)
     return res
@@ -1113,7 +1405,7 @@ def update_cargo_status(
     cargo_id: int,
     req: UpdateCargoStatusRequest,
     request: Request,
-    current_user: models.User = Depends(require_write_role),
+    current_user: models.User = Depends(require_logistics_officer),
     db: Session = Depends(get_db)
 ):
     cached = check_idempotency(request, db)
@@ -1124,8 +1416,27 @@ def update_cargo_status(
     cargo = db.query(models.CargoShipment).filter(models.CargoShipment.id == cargo_id).first()
     if not cargo:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Cargo shipment not found")
+    if cargo.station_name != current_user.station_name:
+        raise HTTPException(status_code=403, detail="Shipment is outside your assigned station")
 
     old_status = cargo.status
+    if (old_status, req.status) not in {("Pending", "In-Transit"), ("In-Transit", "Delivered")}:
+        raise HTTPException(status_code=409, detail=f"Invalid shipment transition from {old_status} to {req.status}")
+    if req.status == "Delivered" and cargo.direction == "Inbound":
+        if not cargo.items_json:
+            raise HTTPException(status_code=400, detail="Cannot receive a shipment without catalog item quantities")
+        for item in cargo.items_json:
+            _apply_catalog_stock_movement(
+                db,
+                item["supply_name"],
+                cargo.station_name,
+                float(item["quantity"]),
+                "RECEIVED",
+                current_user,
+                reference_type="CARGO_SHIPMENT",
+                reference_id=cargo.id,
+                notes=f"Received shipment {cargo.shipment_code}",
+            )
     cargo.status = req.status
     db.commit()
     db.refresh(cargo)
@@ -1137,6 +1448,7 @@ def update_cargo_status(
         "cargo_id": cargo.id,
         "old_status": old_status,
         "new_status": cargo.status,
+        "direction": cargo.direction,
         "client_timestamp": client_ts,
         "received_at": received_at
     }
@@ -1160,14 +1472,39 @@ def update_cargo_status(
         "weight_kg": cargo.weight_kg,
         "volume_m3": cargo.volume_m3,
         "priority": cargo.priority,
-        "status": cargo.status
+        "status": cargo.status,
+        "station_name": cargo.station_name,
+        "direction": cargo.direction,
+        "items": cargo.items_json,
     }
     save_idempotency(request, 200, res, db)
     return res
 
 @app.get("/cargo")
 def get_cargo(current_user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
-    return db.query(models.CargoShipment).order_by(models.CargoShipment.id.desc()).all()
+    query = db.query(models.CargoShipment)
+    if current_user.role in {"Logistics Officer", "Base Admin", "Expedition Leader"}:
+        query = query.filter(models.CargoShipment.station_name == current_user.station_name)
+    elif current_user.role == "Team Member":
+        assigned_expedition_ids = [
+            expedition.id
+            for expedition in db.query(models.Expedition).all()
+            if current_user.id in (expedition.assigned_members or [])
+            or current_user.username in (expedition.assigned_members or [])
+        ]
+        finalized_manifests = db.query(models.CargoManifest).filter(
+            models.CargoManifest.expedition_id.in_(assigned_expedition_ids or [-1]),
+            models.CargoManifest.status.in_(["Approved", "Packed", "Shipped"]),
+        ).all()
+        finalized_codes = [
+            manifest.shipment_code for manifest in finalized_manifests
+            if _manifest_has_valid_contents(manifest)
+        ]
+        query = query.filter(models.CargoShipment.shipment_code.in_(finalized_codes or [""]))
+    else:
+        raise HTTPException(status_code=403, detail="Role cannot view cargo shipments")
+    shipments = query.order_by(models.CargoShipment.id.desc()).all()
+    return [shipment for shipment in shipments if _cargo_shipment_has_valid_items(shipment)]
 
 # --- Vehicles CRUD ---
 @app.post("/vehicles")
@@ -1591,6 +1928,7 @@ def save_planner_schedule(
         exp = models.Expedition(
             name=req.expedition_name or "Bharati 2026 Season Expedition",
             station_name=req.station_name or "Bharati",
+            leader_user_id=current_user.id if current_user.role == "Expedition Leader" else None,
             start_date=start_date or deadline_date - timedelta(days=60),
             end_date=deadline_date,
             status="Planning",
@@ -2062,7 +2400,29 @@ async def get_dashboard_summary(current_user: models.User = Depends(get_current_
         })
 
     # 3. Cargo Shipments Summary
-    all_cargo = db.query(models.CargoShipment).order_by(models.CargoShipment.id.desc()).all()
+    cargo_query = db.query(models.CargoShipment)
+    if current_user.role == "Team Member":
+        assigned_expedition_ids = [
+            expedition.id
+            for expedition in db.query(models.Expedition).all()
+            if current_user.id in (expedition.assigned_members or [])
+            or current_user.username in (expedition.assigned_members or [])
+        ]
+        finalized_manifests = db.query(models.CargoManifest).filter(
+            models.CargoManifest.expedition_id.in_(assigned_expedition_ids or [-1]),
+            models.CargoManifest.status.in_(["Approved", "Packed", "Shipped"]),
+        ).all()
+        finalized_codes = [
+            manifest.shipment_code for manifest in finalized_manifests
+            if _manifest_has_valid_contents(manifest)
+        ]
+        cargo_query = cargo_query.filter(models.CargoShipment.shipment_code.in_(finalized_codes or [""]))
+    else:
+        cargo_query = cargo_query.filter(models.CargoShipment.station_name == user_station)
+    all_cargo = [
+        shipment for shipment in cargo_query.order_by(models.CargoShipment.id.desc()).all()
+        if _cargo_shipment_has_valid_items(shipment)
+    ]
     cargo_in_transit_count = sum(1 for c in all_cargo if c.status == "In-Transit")
     cargo_delivered_count = sum(1 for c in all_cargo if c.status == "Delivered")
     cargo_pending_count = sum(1 for c in all_cargo if c.status == "Pending")
@@ -2080,18 +2440,22 @@ async def get_dashboard_summary(current_user: models.User = Depends(get_current_
     ]
 
     # 4. Inventory Stock & Low Stock Items
-    all_inventory = db.query(models.InventoryItem).order_by(models.InventoryItem.id.asc()).all()
+    all_inventory = db.query(models.InventoryItem).filter(
+        models.InventoryItem.location_station == user_station
+    ).order_by(models.InventoryItem.id.asc()).all()
     low_stock_items = [
         {
             "id": i.id,
             "name": i.name,
             "category": i.category,
             "quantity": i.quantity,
+            "opening_quantity": i.opening_quantity,
             "unit": i.unit,
             "min_required": i.min_required,
-            "location_station": i.location_station
+            "location_station": i.location_station,
+            "status": i.status,
         }
-        for i in all_inventory if i.quantity <= i.min_required
+        for i in all_inventory if i.status != "IN STOCK"
     ]
 
     # 5. Active SOS & Emergency Alerts
@@ -2258,8 +2622,81 @@ def _supply_metadata_for(name: str) -> dict:
         "priority": catalog_item["priority"],
         "priority_value": int(catalog_item["priority_value"]),
         "inventory_name": catalog_item.get("inventory_name", name),
+        "inventory_unit": catalog_item.get("inventory_unit", catalog_item["unit"]),
         "inventory_units_per_cargo_unit": float(catalog_item.get("inventory_units_per_cargo_unit", 1)),
+        "daily_use_per_person": float(catalog_item.get("default_daily_use", 1.0)),
+        "cold_factor_sensitivity": float(catalog_item.get("cold_sensitivity", 1.0)),
     }
+
+
+def _cargo_shipment_has_valid_items(shipment: models.CargoShipment) -> bool:
+    if not shipment.items_json:
+        return False
+    total_weight = 0.0
+    total_volume = 0.0
+    try:
+        for item in shipment.items_json:
+            quantity = int(item["quantity"])
+            metadata = _supply_metadata_for(item["supply_name"])
+            if quantity <= 0:
+                return False
+            total_weight += quantity * metadata["weight_per_unit"]
+            total_volume += quantity * metadata["volume_per_unit"]
+    except (KeyError, TypeError, ValueError, HTTPException):
+        return False
+    return (
+        math.isclose(total_weight, shipment.weight_kg, rel_tol=0.01, abs_tol=0.02)
+        and math.isclose(total_volume, shipment.volume_m3, rel_tol=0.01, abs_tol=0.02)
+    )
+
+
+def _apply_catalog_stock_movement(
+    db: Session,
+    supply_name: str,
+    station_name: str,
+    cargo_quantity: float,
+    movement_type: str,
+    current_user: models.User,
+    reference_type: str,
+    reference_id: int,
+    notes: Optional[str] = None,
+) -> models.InventoryMovement:
+    metadata = _supply_metadata_for(supply_name)
+    item = db.query(models.InventoryItem).filter(
+        models.InventoryItem.name.ilike(metadata["inventory_name"]),
+        models.InventoryItem.location_station == station_name,
+    ).first()
+    if item is None:
+        if cargo_quantity < 0:
+            raise HTTPException(status_code=400, detail=f"No station stock recorded for {supply_name}")
+        item = models.InventoryItem(
+            name=metadata["inventory_name"],
+            category=metadata["category"],
+            quantity=0,
+            opening_quantity=0,
+            status="OUT OF STOCK",
+            unit=metadata["inventory_unit"],
+            min_required=0,
+            daily_use_per_person=metadata["daily_use_per_person"],
+            location_station=station_name,
+            cold_factor_sensitivity=metadata["cold_factor_sensitivity"],
+        )
+        db.add(item)
+        db.flush()
+    elif item.unit != metadata["inventory_unit"]:
+        raise HTTPException(status_code=409, detail=f"Station stock unit for {supply_name} does not match its catalog unit")
+
+    stock_delta = float(cargo_quantity) * metadata["inventory_units_per_cargo_unit"]
+    return _record_inventory_movement(
+        db,
+        item,
+        movement_type,
+        stock_delta,
+        current_user,
+        reference_type=reference_type,
+        reference_id=reference_id,
+        notes=notes,
+    )
 
 
 def _requirement_cargo_rows(db: Session, expedition_id: Optional[int] = None):
@@ -2313,7 +2750,7 @@ class OptimizeCargoRequest(BaseModel):
 @app.post("/cargo/optimize")
 def optimize_cargo_loading(
     req: OptimizeCargoRequest,
-    current_user: models.User = Depends(get_current_user),
+    current_user: models.User = Depends(require_logistics_officer),
     db: Session = Depends(get_db)
 ):
     cargo_items = _requirement_cargo_rows(db, req.expedition_id)
@@ -2446,22 +2883,9 @@ def optimize_cargo_loading(
     }
 
 
-@app.post("/cargo-manifests")
-def create_cargo_manifest(
-    req: CreateCargoManifestRequest,
-    current_user: models.User = Depends(require_write_role),
-    db: Session = Depends(get_db),
-):
-    expedition = db.query(models.Expedition).filter(models.Expedition.id == req.expedition_id).first()
-    if not expedition:
-        raise HTTPException(status_code=404, detail="Expedition not found")
-
+def _validated_manifest_contents(db: Session, req: CreateCargoManifestRequest) -> dict:
     if req.vehicle_capacity_weight_kg <= 0 or req.vehicle_capacity_volume_m3 <= 0:
         raise HTTPException(status_code=400, detail="Vehicle weight and volume capacities must be greater than zero")
-    if db.query(models.CargoManifest).filter(models.CargoManifest.shipment_code == req.shipment_code).first():
-        raise HTTPException(status_code=409, detail="Shipment code already exists; generate a new code")
-    if db.query(models.CargoShipment).filter(models.CargoShipment.shipment_code == req.shipment_code).first():
-        raise HTTPException(status_code=409, detail="Shipment code already exists; generate a new code")
 
     requested_rows = _requirement_cargo_rows(db, req.expedition_id)
     available_by_name = {}
@@ -2509,43 +2933,52 @@ def create_cargo_manifest(
     if total_weight > req.vehicle_capacity_weight_kg or total_volume > req.vehicle_capacity_volume_m3:
         raise HTTPException(status_code=400, detail="Selected cargo exceeds vehicle weight or volume capacity")
 
+    return {
+        "items": items,
+        "total_weight": total_weight,
+        "total_volume": total_volume,
+        "selected_item_count": selected_item_count,
+        "total_priority_value": total_priority_value,
+    }
+
+
+@app.post("/cargo-manifests")
+def create_cargo_manifest(
+    req: CreateCargoManifestRequest,
+    current_user: models.User = Depends(require_logistics_officer),
+    db: Session = Depends(get_db),
+):
+    expedition = db.query(models.Expedition).filter(models.Expedition.id == req.expedition_id).first()
+    if not expedition:
+        raise HTTPException(status_code=404, detail="Expedition not found")
+    if expedition.station_name != current_user.station_name:
+        raise HTTPException(status_code=403, detail="Manifest expedition is outside your assigned station")
+    if not req.title.strip() or not req.shipment_code.strip():
+        raise HTTPException(status_code=400, detail="Manifest title and shipment code are required")
+    if db.query(models.CargoManifest).filter(models.CargoManifest.shipment_code == req.shipment_code).first():
+        raise HTTPException(status_code=409, detail="Shipment code already exists; generate a new code")
+    if db.query(models.CargoShipment).filter(models.CargoShipment.shipment_code == req.shipment_code).first():
+        raise HTTPException(status_code=409, detail="Shipment code already exists; generate a new code")
+
+    contents = _validated_manifest_contents(db, req)
+
     manifest = models.CargoManifest(
         expedition_id=req.expedition_id,
-        shipment_code=req.shipment_code,
-        title=req.title,
-        status=req.status,
+        shipment_code=req.shipment_code.strip(),
+        title=req.title.strip(),
+        status="Draft",
         vehicle_capacity_weight_kg=req.vehicle_capacity_weight_kg,
         vehicle_capacity_volume_m3=req.vehicle_capacity_volume_m3,
-        total_weight_kg=total_weight,
-        total_volume_m3=total_volume,
-        selected_item_count=selected_item_count,
-        total_priority_value=total_priority_value,
-        items_json=items,
+        total_weight_kg=contents["total_weight"],
+        total_volume_m3=contents["total_volume"],
+        selected_item_count=contents["selected_item_count"],
+        total_priority_value=contents["total_priority_value"],
+        items_json=contents["items"],
         created_by_user_id=current_user.id,
     )
     db.add(manifest)
     db.commit()
     db.refresh(manifest)
-
-    cargo_row = db.query(models.CargoShipment).filter(models.CargoShipment.shipment_code == req.shipment_code).first()
-    if cargo_row is None:
-        cargo_row = models.CargoShipment(
-            shipment_code=req.shipment_code,
-            title=req.title,
-            weight_kg=total_weight,
-            volume_m3=total_volume,
-            priority="High" if total_priority_value >= 100 else "Medium",
-            status="Packed",
-            expedition_id=req.expedition_id,
-        )
-        db.add(cargo_row)
-    else:
-        cargo_row.title = req.title
-        cargo_row.weight_kg = total_weight
-        cargo_row.volume_m3 = total_volume
-        cargo_row.expedition_id = req.expedition_id
-        cargo_row.status = "Packed"
-    db.commit()
 
     return {
         "id": manifest.id,
@@ -2560,9 +2993,91 @@ def create_cargo_manifest(
         "selected_item_count": manifest.selected_item_count,
         "total_priority_value": manifest.total_priority_value,
         "items": manifest.items_json,
+        "submitted_at": manifest.submitted_at.isoformat() if manifest.submitted_at else None,
+        "reviewed_by_user_id": manifest.reviewed_by_user_id,
+        "reviewed_at": manifest.reviewed_at.isoformat() if manifest.reviewed_at else None,
+        "rejection_reason": manifest.rejection_reason,
         "created_by": current_user.username,
         "created_at": manifest.created_at.isoformat(),
     }
+
+
+@app.put("/cargo-manifests/{manifest_id}")
+def update_cargo_manifest(
+    manifest_id: int,
+    req: CreateCargoManifestRequest,
+    current_user: models.User = Depends(require_logistics_officer),
+    db: Session = Depends(get_db),
+):
+    manifest = db.query(models.CargoManifest).filter(models.CargoManifest.id == manifest_id).first()
+    if not manifest:
+        raise HTTPException(status_code=404, detail="Cargo manifest not found")
+    if manifest.status not in {"Draft", "Rejected"}:
+        raise HTTPException(status_code=409, detail="Only Draft or Rejected manifests can be edited")
+    expedition = db.query(models.Expedition).filter(models.Expedition.id == manifest.expedition_id).first()
+    if not expedition or expedition.station_name != current_user.station_name:
+        raise HTTPException(status_code=403, detail="Manifest expedition is outside your assigned station")
+    if req.expedition_id != manifest.expedition_id or req.shipment_code != manifest.shipment_code:
+        raise HTTPException(status_code=400, detail="An existing manifest's expedition and shipment code cannot be changed")
+
+    contents = _validated_manifest_contents(db, req)
+    manifest.title = req.title.strip()
+    manifest.vehicle_capacity_weight_kg = req.vehicle_capacity_weight_kg
+    manifest.vehicle_capacity_volume_m3 = req.vehicle_capacity_volume_m3
+    manifest.total_weight_kg = contents["total_weight"]
+    manifest.total_volume_m3 = contents["total_volume"]
+    manifest.selected_item_count = contents["selected_item_count"]
+    manifest.total_priority_value = contents["total_priority_value"]
+    manifest.items_json = contents["items"]
+    manifest.status = "Draft"
+    manifest.submitted_at = None
+    manifest.reviewed_by_user_id = None
+    manifest.reviewed_at = None
+    manifest.rejection_reason = None
+    db.commit()
+    db.refresh(manifest)
+    return {
+        "id": manifest.id,
+        "expedition_id": manifest.expedition_id,
+        "shipment_code": manifest.shipment_code,
+        "title": manifest.title,
+        "status": manifest.status,
+        "total_weight_kg": manifest.total_weight_kg,
+        "total_volume_m3": manifest.total_volume_m3,
+        "selected_item_count": manifest.selected_item_count,
+        "total_priority_value": manifest.total_priority_value,
+        "items": manifest.items_json,
+    }
+
+
+def _manifest_has_valid_contents(manifest: models.CargoManifest) -> bool:
+    if not manifest.shipment_code or not manifest.shipment_code.strip():
+        return False
+    if not manifest.items_json or manifest.selected_item_count <= 0:
+        return False
+
+    try:
+        total_weight = 0.0
+        total_volume = 0.0
+        item_count = 0
+        for item in manifest.items_json:
+            quantity = int(item["quantity"])
+            weight = float(item["weight_per_unit"])
+            volume = float(item["volume_per_unit"])
+            priority_value = int(item["priority_value"])
+            if quantity <= 0 or weight <= 0 or volume <= 0 or priority_value <= 0:
+                return False
+            total_weight += quantity * weight
+            total_volume += quantity * volume
+            item_count += quantity
+    except (KeyError, TypeError, ValueError):
+        return False
+
+    return (
+        item_count == manifest.selected_item_count
+        and math.isclose(total_weight, manifest.total_weight_kg, rel_tol=0.01, abs_tol=0.02)
+        and math.isclose(total_volume, manifest.total_volume_m3, rel_tol=0.01, abs_tol=0.02)
+    )
 
 
 @app.get("/cargo-manifests")
@@ -2572,19 +3087,38 @@ def get_cargo_manifests(
     db: Session = Depends(get_db),
 ):
     query = db.query(models.CargoManifest)
-    if current_user.role in ("Logistics Officer", "Base Admin", "Team Member"):
+    if current_user.role in ("Logistics Officer", "Base Admin", "Expedition Leader"):
         query = query.join(
             models.Expedition,
             models.Expedition.id == models.CargoManifest.expedition_id,
         ).filter(models.Expedition.station_name == current_user.station_name)
+        if current_user.role == "Expedition Leader":
+            query = query.filter(
+                (models.Expedition.leader_user_id == current_user.id)
+                | models.Expedition.leader_user_id.is_(None)
+            )
+    elif current_user.role == "Team Member":
+        assigned_expedition_ids = [
+            expedition.id
+            for expedition in db.query(models.Expedition).all()
+            if current_user.id in (expedition.assigned_members or [])
+            or current_user.username in (expedition.assigned_members or [])
+        ]
+        query = query.filter(
+            models.CargoManifest.expedition_id.in_(assigned_expedition_ids or [-1]),
+            models.CargoManifest.status.in_(["Approved", "Packed", "Shipped"]),
+        )
+    else:
+        raise HTTPException(status_code=403, detail="Role cannot view cargo manifests")
     if expedition_id is not None:
         query = query.filter(models.CargoManifest.expedition_id == expedition_id)
-    elif current_user.role == "Expedition Leader":
-        query = query.filter(models.CargoManifest.expedition_id.in_([
-            row.id for row in db.query(models.Expedition).filter(models.Expedition.station_name == current_user.station_name).all()
-        ]))
-    manifests = query.order_by(models.CargoManifest.id.desc()).all()
-    return [{
+    manifests = []
+    seen_shipment_codes = set()
+    for manifest in query.order_by(models.CargoManifest.id.desc()).all():
+        if manifest.shipment_code in seen_shipment_codes or not _manifest_has_valid_contents(manifest):
+            continue
+        seen_shipment_codes.add(manifest.shipment_code)
+        manifests.append({
         "id": manifest.id,
         "expedition_id": manifest.expedition_id,
         "shipment_code": manifest.shipment_code,
@@ -2597,39 +3131,160 @@ def get_cargo_manifests(
         "selected_item_count": manifest.selected_item_count,
         "total_priority_value": manifest.total_priority_value,
         "items": manifest.items_json,
+        "created_by_user_id": manifest.created_by_user_id,
+        "submitted_at": manifest.submitted_at.isoformat() if manifest.submitted_at else None,
+        "reviewed_by_user_id": manifest.reviewed_by_user_id,
+        "reviewed_at": manifest.reviewed_at.isoformat() if manifest.reviewed_at else None,
+        "rejection_reason": manifest.rejection_reason,
         "created_at": manifest.created_at.isoformat(),
-    } for manifest in manifests]
+        })
+    return manifests
 
 
 @app.patch("/cargo-manifests/{manifest_id}/status")
 def update_cargo_manifest_status(
     manifest_id: int,
-    payload: dict,
-    current_user: models.User = Depends(require_write_role),
+    payload: CargoManifestStatusRequest,
+    current_user: models.User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
     manifest = db.query(models.CargoManifest).filter(models.CargoManifest.id == manifest_id).first()
     if not manifest:
         raise HTTPException(status_code=404, detail="Cargo manifest not found")
 
-    new_status = str(payload.get("status", manifest.status)).strip()
-    if new_status not in {"Packed", "Cancelled", "Archived", "Draft"}:
-        raise HTTPException(status_code=400, detail="Invalid manifest status")
+    expedition = db.query(models.Expedition).filter(models.Expedition.id == manifest.expedition_id).first()
+    if not expedition:
+        raise HTTPException(status_code=404, detail="Manifest expedition not found")
 
-    manifest.status = new_status
+    previous_status = manifest.status
+    new_status = payload.status.strip()
+    now = datetime.now(timezone.utc)
+
+    if current_user.role == "Logistics Officer":
+        if expedition.station_name != current_user.station_name:
+            raise HTTPException(status_code=403, detail="Manifest expedition is outside your assigned station")
+        if new_status == "Submitted" and previous_status in {"Draft", "Rejected"}:
+            manifest.status = "Submitted"
+            manifest.submitted_at = now
+            manifest.reviewed_by_user_id = None
+            manifest.reviewed_at = None
+            manifest.rejection_reason = None
+        elif new_status == "Packed" and previous_status == "Approved":
+            for item in manifest.items_json or []:
+                _apply_catalog_stock_movement(
+                    db,
+                    item["supply_name"],
+                    expedition.station_name,
+                    -float(item["quantity"]),
+                    "ISSUED",
+                    current_user,
+                    reference_type="CARGO_MANIFEST",
+                    reference_id=manifest.id,
+                    notes=f"Issued from manifest {manifest.shipment_code}",
+                )
+            manifest.status = "Packed"
+        elif new_status == "Shipped" and previous_status == "Packed":
+            manifest.status = "Shipped"
+        else:
+            raise HTTPException(status_code=409, detail=f"Logistics cannot change manifest from {previous_status} to {new_status}")
+    elif current_user.role == "Expedition Leader":
+        if new_status not in {"Approved", "Rejected"}:
+            raise HTTPException(status_code=403, detail="Expedition Leaders can only approve or reject submitted manifests")
+        if expedition.station_name != current_user.station_name:
+            raise HTTPException(status_code=403, detail="Manifest is outside your assigned station")
+        if expedition.leader_user_id is not None and expedition.leader_user_id != current_user.id:
+            raise HTTPException(status_code=403, detail="Manifest belongs to another Expedition Leader's expedition")
+        if previous_status != "Submitted":
+            raise HTTPException(status_code=409, detail="Only submitted manifests can be reviewed")
+        if manifest.created_by_user_id == current_user.id:
+            raise HTTPException(status_code=403, detail="You cannot approve or reject your own manifest")
+        if new_status == "Rejected" and not (payload.rejection_reason or "").strip():
+            raise HTTPException(status_code=400, detail="A rejection reason is required")
+        manifest.status = new_status
+        manifest.reviewed_by_user_id = current_user.id
+        manifest.reviewed_at = now
+        manifest.rejection_reason = (payload.rejection_reason or "").strip() if new_status == "Rejected" else None
+    else:
+        raise HTTPException(status_code=403, detail="This role cannot change cargo manifest status")
+
+    if manifest.status in {"Packed", "Shipped"}:
+        cargo_row = db.query(models.CargoShipment).filter(
+            models.CargoShipment.shipment_code == manifest.shipment_code
+        ).first()
+        shipment_status = "Packed" if manifest.status == "Packed" else "In-Transit"
+        if cargo_row is None:
+            cargo_row = models.CargoShipment(
+                shipment_code=manifest.shipment_code,
+                title=manifest.title,
+                weight_kg=manifest.total_weight_kg,
+                volume_m3=manifest.total_volume_m3,
+                priority="High" if manifest.total_priority_value >= 100 else "Medium",
+                status=shipment_status,
+                expedition_id=manifest.expedition_id,
+                station_name=expedition.station_name,
+                direction="Outbound",
+                items_json=manifest.items_json,
+            )
+            db.add(cargo_row)
+        else:
+            cargo_row.title = manifest.title
+            cargo_row.weight_kg = manifest.total_weight_kg
+            cargo_row.volume_m3 = manifest.total_volume_m3
+            cargo_row.status = shipment_status
+            cargo_row.station_name = expedition.station_name
+            cargo_row.direction = "Outbound"
+            cargo_row.items_json = manifest.items_json
+
+    last_log = db.query(AuditLog).order_by(AuditLog.id.desc()).first()
+    previous_hash = last_log.hash if last_log else ("0" * 64)
+    audit_payload = {
+        "manifest_id": manifest.id,
+        "expedition_id": manifest.expedition_id,
+        "shipment_code": manifest.shipment_code,
+        "from_status": previous_status,
+        "to_status": manifest.status,
+        "rejection_reason": manifest.rejection_reason,
+    }
+    audit_hash = AuditLog.compute_hash(
+        "CARGO_MANIFEST_STATUS_CHANGED",
+        current_user.username,
+        f"CARGO-MANIFEST-{manifest.id}",
+        audit_payload,
+        now,
+        previous_hash,
+    )
+    db.add(AuditLog(
+        action="CARGO_MANIFEST_STATUS_CHANGED",
+        performed_by=current_user.username,
+        target_resource=f"CARGO-MANIFEST-{manifest.id}",
+        payload=AuditLog.serialize_payload(audit_payload),
+        timestamp=now,
+        prev_hash=previous_hash,
+        hash=audit_hash,
+    ))
     db.commit()
-    return {"id": manifest.id, "status": manifest.status}
+    return {
+        "id": manifest.id,
+        "status": manifest.status,
+        "reviewed_by_user_id": manifest.reviewed_by_user_id,
+        "reviewed_at": manifest.reviewed_at.isoformat() if manifest.reviewed_at else None,
+        "rejection_reason": manifest.rejection_reason,
+    }
 
 
 @app.delete("/cargo-manifests/{manifest_id}")
 def delete_cargo_manifest(
     manifest_id: int,
-    current_user: models.User = Depends(require_write_role),
+    current_user: models.User = Depends(require_logistics_officer),
     db: Session = Depends(get_db),
 ):
     manifest = db.query(models.CargoManifest).filter(models.CargoManifest.id == manifest_id).first()
     if not manifest:
         raise HTTPException(status_code=404, detail="Cargo manifest not found")
+
+    expedition = db.query(models.Expedition).filter(models.Expedition.id == manifest.expedition_id).first()
+    if not expedition or expedition.station_name != current_user.station_name:
+        raise HTTPException(status_code=403, detail="Manifest is outside your assigned station")
 
     if manifest.status not in {"Draft", "Cancelled"}:
         raise HTTPException(status_code=400, detail="Only draft or cancelled cargo manifests can be deleted")

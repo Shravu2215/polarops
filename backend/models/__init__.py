@@ -1,7 +1,7 @@
 from database import Base
 from models.user import User
 from models.expedition import Expedition
-from models.inventory import InventoryItem
+from models.inventory import InventoryItem, InventoryMovement
 from models.cargo import CargoShipment, CargoManifest
 from models.person import Person
 from models.alert import Alert
@@ -16,6 +16,7 @@ __all__ = [
     "User",
     "Expedition",
     "InventoryItem",
+    "InventoryMovement",
     "CargoShipment",
     "CargoManifest",
     "Person",

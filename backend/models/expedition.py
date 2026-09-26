@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Float, DateTime, Date, JSON
+from sqlalchemy import Column, Integer, String, Float, DateTime, Date, JSON, ForeignKey
 from datetime import datetime
 from database import Base
 
@@ -12,6 +12,7 @@ class Expedition(Base):
     longitude = Column(Float, nullable=True)
     start_date = Column(Date, nullable=False)
     end_date = Column(Date, nullable=False)
+    leader_user_id = Column(Integer, ForeignKey("users.id"), nullable=True, index=True)
     status = Column(String, default="Planning")  # Planning, Active, Completed, Suspended
     target_team_size = Column(Integer, default=25)
     departure_deadline = Column(String, nullable=True)
