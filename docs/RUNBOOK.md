@@ -39,8 +39,12 @@ pip install pytest pytest-asyncio httpx pillow
 # Copy environment template if .env does not exist
 cp .env.example .env
 
-# Initialize database schema and seed initial station personnel, vehicles, and planner data
+# Initialize database schema and seed demo data (expedition, inventory, vehicles, alerts)
 python seed.py
+
+# NOTE: Backend restart karte waqt python seed.py --no-reset use karo agar tum manually
+# add ki gayi cheezein preserve karna chahte ho — plain python seed.py har baar poora
+# database wipe karke fresh demo data bana dega.
 
 # Launch FastAPI development server
 python -m uvicorn main:app --host 0.0.0.0 --port 8000 --reload

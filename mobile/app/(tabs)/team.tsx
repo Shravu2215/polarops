@@ -215,11 +215,11 @@ export default function TeamScreen() {
                         <MaterialIcons name="location-on" size={13} color={colors.primary} /> {person.station_name} Station
                       </Text>
                     </View>
-                    {/* Fresh / Stale Badge */}
+                    {/* Location Freshness Badge */}
                     <View style={[styles.badge, freshness.isFresh ? styles.badgeFresh : styles.badgeStale]}>
                       <View style={[styles.badgeDot, freshness.isFresh ? styles.dotFresh : styles.dotStale]} />
                       <Text style={[styles.badgeText, freshness.isFresh ? styles.textFresh : styles.textStale]}>
-                        {freshness.isFresh ? 'Fresh' : 'Stale'}
+                        {freshness.isFresh ? 'Location Updated' : 'Location Outdated'}
                       </Text>
                     </View>
                   </View>
@@ -239,9 +239,6 @@ export default function TeamScreen() {
                     <Text style={styles.updateText}>
                       <MaterialIcons name="access-time" size={13} color={colors.secondaryText} /> {freshness.label}
                     </Text>
-                    <View style={styles.statusPill}>
-                      <Text style={styles.statusText}>{person.status || 'Active'}</Text>
-                    </View>
                   </View>
                 </View>
               );
