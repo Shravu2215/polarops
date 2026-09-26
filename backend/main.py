@@ -1059,11 +1059,22 @@ def get_planner_schedule(
             "schedule": exp.schedule_output
         }
 
+    default_deadline = (datetime.now(timezone.utc) + timedelta(days=90)).strftime("%Y-%m-%d")
+    default_milestones = [
+        {"name": "Equipment Maintenance & Testing", "duration_days": 15},
+        {"name": "Medical Clearances & Training", "duration_days": 10},
+        {"name": "Cargo Packing & Weight Verification", "duration_days": 14},
+        {"name": "Vessel Loading & Departure", "duration_days": 7},
+        {"name": "Southern Ocean Transit", "duration_days": 20},
+        {"name": "Ice Shelf Offloading & Base Setup", "duration_days": 10}
+    ]
+    calc = calculate_backward_schedule(default_deadline, default_milestones)
+
     return {
         "expedition_id": exp.id if exp else None,
-        "expedition_name": exp.name if exp else None,
-        "station_name": exp.station_name if exp else None,
-        "schedule": None
+        "expedition_name": exp.name if exp else "Maitri Season Expedition",
+        "station_name": exp.station_name if exp else "Maitri",
+        "schedule": calc
     }
 
 @app.post("/planner/schedule")
