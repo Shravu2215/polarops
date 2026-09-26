@@ -70,6 +70,7 @@ export default function CargoScreen() {
   const [selectedExpeditionId, setSelectedExpeditionId] = useState<number | null>(null);
   const [requirements, setRequirements] = useState<RequirementItem[]>([]);
   const [selectedQuantities, setSelectedQuantities] = useState<Record<number, number>>({});
+  const [requirementsError, setRequirementsError] = useState<string | null>(null);
   const [savedManifests, setSavedManifests] = useState<ManifestEntry[]>([]);
   const [capacityWeight, setCapacityWeight] = useState<string>('120');
   const [capacityVolume, setCapacityVolume] = useState<string>('4.0');
@@ -96,22 +97,30 @@ export default function CargoScreen() {
   };
 
   const fetchRequirements = async (expeditionId: number | null) => {
+    setRequirementsError(null);
     if (!token || !expeditionId) {
       setRequirements([]);
       setSelectedQuantities({});
       return;
     }
-    const res = await fetch(`${BACKEND_URL}/expedition-requirements?expedition_id=${expeditionId}`, {
-      headers: { Authorization: `Bearer ${token}` },
-    });
-    if (!res.ok) throw new Error('Unable to load expedition requirements.');
-    const data: RequirementItem[] = await res.json();
-    const defaults: Record<number, number> = {};
-    data.forEach((item) => {
-      defaults[item.id] = 0;
-    });
-    setRequirements(data);
-    setSelectedQuantities(defaults);
+    try {
+      const res = await fetch(`${BACKEND_URL}/expedition-requirements?expedition_id=${expeditionId}`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      const responseData = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(responseData.detail || 'Unable to load expedition requirements.');
+      const data: RequirementItem[] = responseData;
+      const defaults: Record<number, number> = {};
+      data.forEach((item) => {
+        defaults[item.id] = 0;
+      });
+      setRequirements(data);
+      setSelectedQuantities(defaults);
+    } catch (error) {
+      setRequirements([]);
+      setSelectedQuantities({});
+      setRequirementsError(error instanceof Error ? error.message : 'Unable to load expedition requirements.');
+    }
   };
 
   const fetchManifests = async (expeditionId: number | null) => {
@@ -398,6 +407,8 @@ export default function CargoScreen() {
           <Text style={styles.sectionTitle}>Expedition Requirements / Inventory</Text>
           {loading ? (
             <ActivityIndicator size="large" color={colors.primary} style={{ marginVertical: 12 }} />
+          ) : requirementsError ? (
+            <Text style={styles.emptyText}>{requirementsError}</Text>
           ) : requirements.length === 0 ? (
             <Text style={styles.emptyText}>No supplies are linked to this expedition yet.</Text>
           ) : (

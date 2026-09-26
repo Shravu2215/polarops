@@ -252,6 +252,73 @@ class TestRequirementsSuite(unittest.TestCase):
             self.assertEqual(len(visible_response.json()), 1)
             self.assertEqual(visible_response.json()[0]["quantity"], 200)
 
+        member_response = self.client.post("/auth/register", json={
+            "username": "station_member",
+            "email": "station_member@polarops.in",
+            "password": "password123",
+            "station_name": "Maitri",
+        })
+        member_headers = {"Authorization": f"Bearer {member_response.json()['access_token']}"}
+        member_visible_response = self.client.get(
+            f"/expedition-requirements?expedition_id={expedition_id}",
+            headers=member_headers,
+        )
+        self.assertEqual(member_visible_response.status_code, 200)
+        self.assertEqual(len(member_visible_response.json()), 1)
+
+        other_expedition_response = self.client.post("/expeditions", headers=self.leader_headers, json={
+            "name": "Other Station Supply Expedition",
+            "station_name": "Bharati",
+            "start_date": "2026-11-01",
+            "end_date": "2027-03-01",
+            "status": "Active",
+        })
+        other_expedition_id = other_expedition_response.json()["id"]
+        self.client.post("/expedition-requirements", headers=self.leader_headers, json={
+            "expedition_id": other_expedition_id,
+            "supply_name": "Emergency Oxygen Cylinders",
+            "quantity": 2,
+        })
+        member_other_station_response = self.client.get(
+            f"/expedition-requirements?expedition_id={other_expedition_id}",
+            headers=member_headers,
+        )
+        self.assertEqual(member_other_station_response.status_code, 200)
+        self.assertEqual(member_other_station_response.json(), [])
+
+        db = next(get_db())
+        for manifest_expedition_id, shipment_code in (
+            (expedition_id, "MAITRI-TEAM-MANIFEST"),
+            (other_expedition_id, "BHARATI-TEAM-MANIFEST"),
+        ):
+            db.add(models.CargoManifest(
+                expedition_id=manifest_expedition_id,
+                shipment_code=shipment_code,
+                title="Station cargo manifest",
+                status="Packed",
+                vehicle_capacity_weight_kg=100,
+                vehicle_capacity_volume_m3=2,
+                total_weight_kg=1,
+                total_volume_m3=0.1,
+                selected_item_count=1,
+                total_priority_value=5,
+                items_json=[],
+            ))
+        db.commit()
+
+        member_manifests_response = self.client.get(
+            f"/cargo-manifests?expedition_id={expedition_id}",
+            headers=member_headers,
+        )
+        self.assertEqual(member_manifests_response.status_code, 200)
+        self.assertTrue(any(item["shipment_code"] == "MAITRI-TEAM-MANIFEST" for item in member_manifests_response.json()))
+        member_other_manifests_response = self.client.get(
+            f"/cargo-manifests?expedition_id={other_expedition_id}",
+            headers=member_headers,
+        )
+        self.assertEqual(member_other_manifests_response.status_code, 200)
+        self.assertEqual(member_other_manifests_response.json(), [])
+
     def test_vehicle_permissions_assignment_status_and_soft_deactivation(self):
         member_response = self.client.post("/auth/register", json={
             "username": "fleet_member",

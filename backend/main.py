@@ -832,7 +832,7 @@ def get_expedition_requirements(
     db: Session = Depends(get_db)
 ):
     query = db.query(models.ExpeditionRequirement)
-    if current_user.role in ("Logistics Officer", "Base Admin"):
+    if current_user.role in ("Logistics Officer", "Base Admin", "Team Member"):
         query = query.join(
             models.Expedition,
             models.Expedition.id == models.ExpeditionRequirement.expedition_id
@@ -2572,13 +2572,17 @@ def get_cargo_manifests(
     db: Session = Depends(get_db),
 ):
     query = db.query(models.CargoManifest)
+    if current_user.role in ("Logistics Officer", "Base Admin", "Team Member"):
+        query = query.join(
+            models.Expedition,
+            models.Expedition.id == models.CargoManifest.expedition_id,
+        ).filter(models.Expedition.station_name == current_user.station_name)
     if expedition_id is not None:
         query = query.filter(models.CargoManifest.expedition_id == expedition_id)
-    else:
-        if current_user.role == "Expedition Leader":
-            query = query.filter(models.CargoManifest.expedition_id.in_([
-                row.id for row in db.query(models.Expedition).filter(models.Expedition.station_name == current_user.station_name).all()
-            ]))
+    elif current_user.role == "Expedition Leader":
+        query = query.filter(models.CargoManifest.expedition_id.in_([
+            row.id for row in db.query(models.Expedition).filter(models.Expedition.station_name == current_user.station_name).all()
+        ]))
     manifests = query.order_by(models.CargoManifest.id.desc()).all()
     return [{
         "id": manifest.id,
