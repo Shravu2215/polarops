@@ -75,6 +75,31 @@ class TestPlannerSuite(unittest.TestCase):
         audit_data = audit_res.json()
         self.assertTrue(any(log["action"] == "PLAN_UPDATE" for log in audit_data))
 
+        start_date = (datetime.now(timezone.utc) + timedelta(days=5)).strftime("%Y-%m-%d")
+        end_date = (datetime.now(timezone.utc) + timedelta(days=60)).strftime("%Y-%m-%d")
+        update_res = self.client.post("/planner/schedule", json={
+            "expedition_id": save_data["expedition_id"],
+            "expedition_name": "Maitri Expedition Plan",
+            "station_name": "Bharati",
+            "start_date": start_date,
+            "departure_deadline": end_date,
+            "milestones": [{"name": "Cargo Pack", "duration_days": 7}],
+        }, headers=headers)
+        self.assertEqual(update_res.status_code, 200, update_res.text)
+        expedition_list = self.client.get("/expeditions", headers=headers).json()
+        updated_expedition = next(item for item in expedition_list if item["id"] == save_data["expedition_id"])
+        self.assertEqual(updated_expedition["station_name"], "Bharati")
+        self.assertEqual(updated_expedition["start_date"], start_date)
+        self.assertEqual(updated_expedition["end_date"], end_date)
+
+        invalid_dates_res = self.client.post("/planner/schedule", json={
+            "expedition_id": save_data["expedition_id"],
+            "start_date": end_date,
+            "departure_deadline": start_date,
+            "milestones": [{"name": "Cargo Pack", "duration_days": 7}],
+        }, headers=headers)
+        self.assertEqual(invalid_dates_res.status_code, 400)
+
 if __name__ == "__main__":
     unittest.main()
 

@@ -8,6 +8,7 @@ import {
   TextInput,
   ActivityIndicator,
   Alert,
+  Platform,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
@@ -47,13 +48,80 @@ interface AuditEntry {
   hash: string;
 }
 
+function DateField({
+  value,
+  onChange,
+  editable,
+  accessibilityLabel,
+}: {
+  value: string;
+  onChange: (value: string) => void;
+  editable: boolean;
+  accessibilityLabel: string;
+}) {
+  if (Platform.OS === 'web') {
+    return React.createElement('input' as any, {
+      type: 'date',
+      value,
+      disabled: !editable,
+      'aria-label': accessibilityLabel,
+      onChange: (event: { currentTarget: { value: string } }) => onChange(event.currentTarget.value),
+      style: {
+        boxSizing: 'border-box',
+        width: '100%',
+        height: 42,
+        padding: '8px 10px',
+        backgroundColor: colors.background,
+        border: `1px solid ${colors.cardBorder}`,
+        borderRadius: radius.default,
+        color: colors.text,
+        fontFamily: typography.fontFamily.regular,
+        fontSize: typography.fontSize.sm,
+        marginBottom: spacing.xs,
+      },
+    });
+  }
+
+  return (
+    <TextInput
+      style={styles.input}
+      value={value}
+      onChangeText={onChange}
+      placeholder="YYYY-MM-DD"
+      editable={editable}
+    />
+  );
+}
+
+const parseLocalDate = (value: string) => {
+  const [year, month, day] = value.split('-').map(Number);
+  const date = new Date(year, month - 1, day);
+  return date.getFullYear() === year && date.getMonth() === month - 1 && date.getDate() === day
+    ? date
+    : new Date(Number.NaN);
+};
+
+const formatLocalDate = (date: Date) => {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+};
+
 export default function PlannerScreen() {
   const router = useRouter();
   const { token, user } = useApp();
   const isTeamMember = user?.role === 'Team Member';
 
+  const [expeditions, setExpeditions] = useState<any[]>([]);
+  const [selectedExpeditionId, setSelectedExpeditionId] = useState<number | null>(null);
+  const [stations, setStations] = useState<string[]>([]);
+  const [showExpeditionOptions, setShowExpeditionOptions] = useState<boolean>(false);
+  const [showStationOptions, setShowStationOptions] = useState<boolean>(false);
+
   const [expeditionName, setExpeditionName] = useState<string>('');
   const [stationName, setStationName] = useState<string>('');
+  const [startDate, setStartDate] = useState<string>('');
   const [departureDeadline, setDepartureDeadline] = useState<string>('');
   const [milestones, setMilestones] = useState<MilestoneItem[]>([]);
 
@@ -70,29 +138,26 @@ export default function PlannerScreen() {
       const headers: Record<string, string> = {};
       if (token) headers['Authorization'] = `Bearer ${token}`;
 
-      const [planRes, auditRes] = await Promise.all([
-        fetch(`${BACKEND_URL}/planner`, { headers }),
+      const [expRes, auditRes, stationRes] = await Promise.all([
+        fetch(`${BACKEND_URL}/expeditions`, { headers }),
         fetch(`${BACKEND_URL}/audit`, { headers }),
+        fetch(`${BACKEND_URL}/stations`, { headers }),
       ]);
 
-      if (planRes.ok) {
-        const pData = await planRes.json();
-        if (pData.expedition_name) setExpeditionName(pData.expedition_name);
-        if (pData.station_name) setStationName(pData.station_name);
-        if (pData.schedule) {
-          setSchedule(pData.schedule);
-          if (pData.schedule.departure_deadline) {
-            setDepartureDeadline(pData.schedule.departure_deadline);
-          }
-          if (pData.schedule.scheduled_milestones) {
-            setMilestones(
-              pData.schedule.scheduled_milestones.map((m: any) => ({
-                name: m.name,
-                duration_days: m.duration_days,
-              }))
-            );
-          }
+      if (expRes.ok) {
+        const data = await expRes.json();
+        setExpeditions(data);
+        if (data.length > 0 && !selectedExpeditionId) {
+          handleSelectExpedition(data[0]);
+        } else if (selectedExpeditionId) {
+            const current = data.find((e: any) => e.id === selectedExpeditionId);
+            if(current) handleSelectExpedition(current, false);
         }
+      }
+
+      if (stationRes.ok) {
+        const stationData = await stationRes.json();
+        setStations(stationData.map((station: { name: string }) => station.name));
       }
 
       if (auditRes.ok) {
@@ -107,6 +172,29 @@ export default function PlannerScreen() {
     }
   };
 
+  const handleSelectExpedition = (exp: any, override: boolean = true) => {
+    setSelectedExpeditionId(exp.id);
+    if(override) {
+        setExpeditionName(exp.name);
+        setStationName(exp.station_name);
+        setStartDate(exp.start_date || '');
+        setDepartureDeadline(exp.departure_deadline || exp.end_date || '');
+        setSchedule(exp.schedule_output || null);
+        if (exp.schedule_output) {
+            setSchedule(exp.schedule_output);
+        }
+        if (exp.milestones_json) {
+            setMilestones(exp.milestones_json);
+        } else {
+            // defaults
+            setMilestones([
+                { name: "Equipment Maintenance", duration_days: 15 },
+                { name: "Medical Clearances", duration_days: 10 }
+            ]);
+        }
+    }
+  };
+
   useEffect(() => {
     fetchPlannerAndAudit();
   }, [token]);
@@ -114,18 +202,8 @@ export default function PlannerScreen() {
   useEffect(() => {
     if (!departureDeadline || milestones.length === 0) return;
 
-    let deadlineDate: Date;
-    try {
-      const parts = departureDeadline.split('-');
-      if (parts.length === 3) {
-        deadlineDate = new Date(Number(parts[0]), Number(parts[1]) - 1, Number(parts[2]));
-      } else {
-        deadlineDate = new Date(departureDeadline);
-      }
-      if (isNaN(deadlineDate.getTime())) return;
-    } catch {
-      return;
-    }
+    const deadlineDate = parseLocalDate(departureDeadline);
+    if (isNaN(deadlineDate.getTime())) return;
 
     const today = new Date();
     today.setHours(0, 0, 0, 0);
@@ -137,25 +215,25 @@ export default function PlannerScreen() {
       const m = milestones[i];
       const duration = Number(m.duration_days) || 1;
 
-      const startDate = new Date(currFinish);
-      startDate.setDate(startDate.getDate() - duration);
+      const startDateCalc = new Date(currFinish);
+      startDateCalc.setDate(startDateCalc.getDate() - duration);
 
-      const isAtRisk = startDate < today;
+      const isAtRisk = startDateCalc < today;
 
       scheduled.push({
         name: m.name,
         duration_days: duration,
-        latest_start_date: startDate.toISOString().split('T')[0],
-        latest_finish_date: currFinish.toISOString().split('T')[0],
+        latest_start_date: formatLocalDate(startDateCalc),
+        latest_finish_date: formatLocalDate(currFinish),
         is_at_risk: isAtRisk
       });
 
-      currFinish = new Date(startDate);
+      currFinish = new Date(startDateCalc);
     }
 
     scheduled.reverse();
 
-    const earliestStart = scheduled.length > 0 ? new Date(scheduled[0].latest_start_date) : today;
+    const earliestStart = scheduled.length > 0 ? parseLocalDate(scheduled[0].latest_start_date) : today;
     const diffTime = earliestStart.getTime() - today.getTime();
     const totalBufferDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
 
@@ -171,8 +249,16 @@ export default function PlannerScreen() {
   }, [departureDeadline, milestones]);
 
   const handleComputeAndSave = async () => {
-    if (!departureDeadline.match(/^\d{4}-\d{2}-\d{2}$/)) {
-      Alert.alert('Invalid Date', 'Please enter departure deadline in YYYY-MM-DD format');
+    if (!selectedExpeditionId) {
+      Alert.alert('Select Expedition', 'Choose an existing expedition before saving its plan.');
+      return;
+    }
+    if (!startDate.match(/^\d{4}-\d{2}-\d{2}$/) || !departureDeadline.match(/^\d{4}-\d{2}-\d{2}$/)) {
+      Alert.alert('Dates Required', 'Choose both an expedition start date and end date.');
+      return;
+    }
+    if (startDate > departureDeadline) {
+      Alert.alert('Invalid Date Range', 'The start date must be on or before the end date.');
       return;
     }
 
@@ -182,8 +268,10 @@ export default function PlannerScreen() {
       if (token) headers['Authorization'] = `Bearer ${token}`;
 
       const payload = {
+        expedition_id: selectedExpeditionId,
         expedition_name: expeditionName,
         station_name: stationName,
+        start_date: startDate,
         departure_deadline: departureDeadline,
         milestones: milestones.map(m => ({
           name: m.name,
@@ -200,8 +288,8 @@ export default function PlannerScreen() {
       if (res.ok) {
         const data = await res.json();
         setSchedule(data.schedule);
-        Alert.alert('Schedule Saved', 'Backward schedule computed and logged to immutable AuditLog!');
-        fetchPlannerAndAudit();
+        Alert.alert('Schedule Saved', 'Expedition plan, station, and dates were saved.');
+        void fetchPlannerAndAudit();
       } else {
         const err = await res.json();
         Alert.alert('Save Failed', err.detail || 'Failed to save planner schedule');
@@ -279,6 +367,35 @@ export default function PlannerScreen() {
           <View style={styles.card}>
             <Text style={styles.cardTitle}>Departure Deadline & Milestones</Text>
 
+            <Text style={styles.inputLabel}>Existing Expedition</Text>
+            <TouchableOpacity
+              style={[styles.input, styles.selectInput, isTeamMember && styles.disabledInput]}
+              onPress={() => setShowExpeditionOptions((visible) => !visible)}
+              disabled={isTeamMember || expeditions.length === 0}
+            >
+              <Text style={styles.selectText}>
+                {expeditions.find((exp) => exp.id === selectedExpeditionId)?.name || 'No expeditions available'}
+              </Text>
+              <MaterialIcons name={showExpeditionOptions ? 'expand-less' : 'expand-more'} size={20} color={colors.secondaryText} />
+            </TouchableOpacity>
+            {showExpeditionOptions ? (
+              <View style={styles.optionList}>
+                {expeditions.map((exp) => (
+                  <TouchableOpacity
+                    key={exp.id}
+                    style={styles.optionButton}
+                    onPress={() => {
+                      handleSelectExpedition(exp);
+                      setShowExpeditionOptions(false);
+                    }}
+                  >
+                    <Text style={styles.optionText}>{exp.name}</Text>
+                    <Text style={styles.optionSubText}>{exp.station_name}</Text>
+                  </TouchableOpacity>
+                ))}
+              </View>
+            ) : null}
+
             <Text style={styles.inputLabel}>Expedition Name</Text>
             <TextInput
               style={[styles.input, isTeamMember && { backgroundColor: colors.cardBorder + '30', color: colors.secondaryText }]}
@@ -288,26 +405,40 @@ export default function PlannerScreen() {
               editable={!isTeamMember}
             />
 
+            <Text style={styles.inputLabel}>Station</Text>
+            <TouchableOpacity
+              style={[styles.input, styles.selectInput, isTeamMember && styles.disabledInput]}
+              onPress={() => setShowStationOptions((visible) => !visible)}
+              disabled={isTeamMember}
+            >
+              <Text style={styles.selectText}>{stationName || 'Choose a station'}</Text>
+              <MaterialIcons name={showStationOptions ? 'expand-less' : 'expand-more'} size={20} color={colors.secondaryText} />
+            </TouchableOpacity>
+            {showStationOptions ? (
+              <View style={styles.optionList}>
+                {stations.map((station) => (
+                  <TouchableOpacity
+                    key={station}
+                    style={styles.optionButton}
+                    onPress={() => {
+                      setStationName(station);
+                      setShowStationOptions(false);
+                    }}
+                  >
+                    <Text style={styles.optionText}>{station}</Text>
+                  </TouchableOpacity>
+                ))}
+              </View>
+            ) : null}
+
             <View style={styles.row}>
               <View style={{ flex: 1, marginRight: spacing.xs }}>
-                <Text style={styles.inputLabel}>Station Name</Text>
-                <TextInput
-                  style={[styles.input, isTeamMember && { backgroundColor: colors.cardBorder + '30', color: colors.secondaryText }]}
-                  value={stationName}
-                  onChangeText={setStationName}
-                  placeholder="Station Name"
-                  editable={!isTeamMember}
-                />
+                <Text style={styles.inputLabel}>Start Date</Text>
+                <DateField value={startDate} onChange={setStartDate} editable={!isTeamMember} accessibilityLabel="Expedition start date" />
               </View>
               <View style={{ flex: 1, marginLeft: spacing.xs }}>
-                <Text style={styles.inputLabel}>Deadline (YYYY-MM-DD)</Text>
-                <TextInput
-                  style={[styles.input, isTeamMember && { backgroundColor: colors.cardBorder + '30', color: colors.secondaryText }]}
-                  value={departureDeadline}
-                  onChangeText={setDepartureDeadline}
-                  placeholder="2026-11-15"
-                  editable={!isTeamMember}
-                />
+                <Text style={styles.inputLabel}>End Date</Text>
+                <DateField value={departureDeadline} onChange={setDepartureDeadline} editable={!isTeamMember} accessibilityLabel="Expedition end date" />
               </View>
             </View>
 
@@ -370,10 +501,10 @@ export default function PlannerScreen() {
 
             <TouchableOpacity
               onPress={handleComputeAndSave}
-              disabled={saving || isTeamMember}
+              disabled={saving || isTeamMember || !selectedExpeditionId}
               style={[
                 styles.computeBtn,
-                (saving || isTeamMember) && { opacity: 0.6, backgroundColor: isTeamMember ? colors.secondaryText : colors.primary },
+                (saving || isTeamMember || !selectedExpeditionId) && { opacity: 0.6, backgroundColor: isTeamMember ? colors.secondaryText : colors.primary },
               ]}
             >
               {saving ? (
@@ -595,6 +726,34 @@ const styles = StyleSheet.create({
     color: colors.text,
     marginBottom: spacing.xs,
   },
+  selectInput: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    minHeight: 42,
+  },
+  disabledInput: { backgroundColor: colors.cardBorder + '30' },
+  selectText: { fontFamily: typography.fontFamily.medium, fontSize: typography.fontSize.sm, color: colors.text },
+  optionList: {
+    maxHeight: 180,
+    borderWidth: 1,
+    borderColor: colors.cardBorder,
+    borderRadius: radius.default,
+    marginBottom: spacing.sm,
+    overflow: 'hidden',
+  },
+  optionButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: spacing.sm,
+    paddingVertical: spacing.sm,
+    backgroundColor: colors.card,
+    borderBottomWidth: 1,
+    borderBottomColor: colors.cardBorder,
+  },
+  optionText: { fontFamily: typography.fontFamily.medium, fontSize: typography.fontSize.sm, color: colors.text },
+  optionSubText: { fontFamily: typography.fontFamily.regular, fontSize: typography.fontSize.xs, color: colors.secondaryText },
   row: { flexDirection: 'row', alignItems: 'center' },
   milestoneRow: {
     flexDirection: 'row',

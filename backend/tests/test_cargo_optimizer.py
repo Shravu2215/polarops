@@ -158,6 +158,19 @@ class TestCargoOptimizerSuite(unittest.TestCase):
             requirement_res = self.client.post("/expedition-requirements", json=payload, headers=headers)
             self.assertEqual(requirement_res.status_code, 200, requirement_res.text)
 
+        db.add_all([
+            models.InventoryItem(name="Emergency Rations (MRE)", category="Ration", quantity=14, unit="Units", min_required=0, daily_use_per_person=0, location_station="Maitri"),
+            models.InventoryItem(name="Emergency Oxygen Cylinders", category="Medical", quantity=4, unit="Cylinders", min_required=0, daily_use_per_person=0, location_station="Maitri"),
+            models.InventoryItem(name="Thermal Gear Sets", category="Spares", quantity=3, unit="Units", min_required=0, daily_use_per_person=0, location_station="Maitri"),
+        ])
+        db.commit()
+
+        requirement_data = self.client.get(
+            f"/expedition-requirements?expedition_id={expedition_id}", headers=headers
+        ).json()
+        self.assertTrue(all(item["weight_per_unit"] > 0 and item["volume_per_unit"] > 0 for item in requirement_data))
+        self.assertTrue(all(item["priority_value"] > 0 and item["available_quantity"] > 0 for item in requirement_data))
+
         optimize_res = self.client.post("/cargo/optimize", json={
             "expedition_id": expedition_id,
             "capacity_weight_kg": 120.0,
@@ -184,6 +197,26 @@ class TestCargoOptimizerSuite(unittest.TestCase):
         persisted = self.client.get(f"/cargo-manifests?expedition_id={expedition_id}", headers=headers)
         self.assertEqual(persisted.status_code, 200)
         self.assertGreater(len(persisted.json()), 0)
+
+        duplicate_res = self.client.post("/cargo-manifests", json={
+            "expedition_id": expedition_id,
+            "title": "Duplicate Manifest",
+            "shipment_code": "MANIFEST-101",
+            "vehicle_capacity_weight_kg": 120.0,
+            "vehicle_capacity_volume_m3": 4.0,
+            "items": [{"supply_name": "Dehydrated Ration Packs", "quantity": 1}],
+        }, headers=headers)
+        self.assertEqual(duplicate_res.status_code, 409)
+
+        stock_limit_res = self.client.post("/cargo-manifests", json={
+            "expedition_id": expedition_id,
+            "title": "Over-stock Manifest",
+            "shipment_code": "MANIFEST-OVER-STOCK",
+            "vehicle_capacity_weight_kg": 120.0,
+            "vehicle_capacity_volume_m3": 4.0,
+            "items": [{"supply_name": "Dehydrated Ration Packs", "quantity": 15}],
+        }, headers=headers)
+        self.assertEqual(stock_limit_res.status_code, 400)
 
     def test_simulator_and_priority_sync(self):
         # Register and Login

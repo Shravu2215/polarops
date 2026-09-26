@@ -33,10 +33,12 @@ interface RequirementItem {
   quantity: number;
   unit: string;
   status: string;
-  weight_per_unit?: number;
-  volume_per_unit?: number;
-  priority?: string;
-  priority_value?: number;
+  weight_per_unit: number;
+  volume_per_unit: number;
+  priority: string;
+  priority_value: number;
+  available_quantity: number;
+  max_selectable_quantity: number;
 }
 
 interface ManifestEntry {
@@ -76,21 +78,21 @@ export default function CargoScreen() {
   const [loading, setLoading] = useState<boolean>(true);
   const [refreshing, setRefreshing] = useState<boolean>(false);
   const [title, setTitle] = useState<string>('Expedition Cargo Pack');
-  const [shipmentCode, setShipmentCode] = useState<string>('PKG-');
 
   const isWriteAllowed = user?.role !== 'Team Member';
 
   const fetchExpeditions = async () => {
-    if (!token) return;
+    if (!token) return [];
     const res = await fetch(`${BACKEND_URL}/expeditions`, {
       headers: { Authorization: `Bearer ${token}` },
     });
     if (!res.ok) throw new Error('Unable to load expedition list.');
     const data: ExpeditionOption[] = await res.json();
     setExpeditions(data);
-    if (!selectedExpeditionId && data.length > 0) {
-      setSelectedExpeditionId(data[0].id);
+    if (!data.some((expedition) => expedition.id === selectedExpeditionId)) {
+      setSelectedExpeditionId(data[0]?.id ?? null);
     }
+    return data;
   };
 
   const fetchRequirements = async (expeditionId: number | null) => {
@@ -112,9 +114,10 @@ export default function CargoScreen() {
     setSelectedQuantities(defaults);
   };
 
-  const fetchManifests = async () => {
+  const fetchManifests = async (expeditionId: number | null) => {
     if (!token) return;
-    const res = await fetch(`${BACKEND_URL}/cargo-manifests`, {
+    const query = expeditionId ? `?expedition_id=${expeditionId}` : '';
+    const res = await fetch(`${BACKEND_URL}/cargo-manifests${query}`, {
       headers: { Authorization: `Bearer ${token}` },
     });
     if (res.ok) {
@@ -127,10 +130,12 @@ export default function CargoScreen() {
     if (!token) return;
     setLoading(true);
     try {
-      await fetchExpeditions();
-      const activeExpedition = selectedExpeditionId ?? (expeditions[0]?.id ?? null);
-      await fetchRequirements(activeExpedition);
-      await fetchManifests();
+      const loadedExpeditions = await fetchExpeditions();
+      const activeExpedition = loadedExpeditions.some((expedition) => expedition.id === selectedExpeditionId)
+        ? selectedExpeditionId
+        : (loadedExpeditions[0]?.id ?? null);
+      setSelectedExpeditionId(activeExpedition);
+      await Promise.all([fetchRequirements(activeExpedition), fetchManifests(activeExpedition)]);
     } catch (error) {
       Alert.alert('Cargo loading error', error instanceof Error ? error.message : 'Failed to load cargo data.');
     } finally {
@@ -148,6 +153,7 @@ export default function CargoScreen() {
   useEffect(() => {
     if (selectedExpeditionId) {
       void fetchRequirements(selectedExpeditionId);
+      void fetchManifests(selectedExpeditionId);
     }
   }, [selectedExpeditionId]);
 
@@ -156,10 +162,10 @@ export default function CargoScreen() {
       .map((item) => {
         const selectedQty = Number(selectedQuantities[item.id] ?? 0);
         const safeQty = Math.max(0, Math.min(selectedQty, item.quantity));
-        const weightPerUnit = Number(item.weight_per_unit ?? 0);
-        const volumePerUnit = Number(item.volume_per_unit ?? 0);
-        const priority = item.priority ?? 'Medium';
-        const priorityValue = Number(item.priority_value ?? 1);
+        const weightPerUnit = Number(item.weight_per_unit);
+        const volumePerUnit = Number(item.volume_per_unit);
+        const priority = item.priority;
+        const priorityValue = Number(item.priority_value);
         return {
           ...item,
           selected_quantity: safeQty,
@@ -192,8 +198,8 @@ export default function CargoScreen() {
   const remainingVolume = Number(capacityVolume || 0) - totalVolume;
 
   const handleQuantityChange = (itemId: number, qty: number) => {
-    const maxQty = requirements.find((item) => item.id === itemId)?.quantity ?? 0;
-    const numericQty = Number.isFinite(qty) ? Math.max(0, Math.min(qty, maxQty)) : 0;
+    const maxQty = requirements.find((item) => item.id === itemId)?.max_selectable_quantity ?? 0;
+    const numericQty = Number.isFinite(qty) ? Math.max(0, Math.min(Math.floor(qty), maxQty)) : 0;
     setSelectedQuantities((previous) => ({ ...previous, [itemId]: numericQty }));
   };
 
@@ -241,6 +247,16 @@ export default function CargoScreen() {
       Alert.alert('Please select an expedition first.');
       return;
     }
+    const weightCapacity = Number(capacityWeight);
+    const volumeCapacity = Number(capacityVolume);
+    if (!Number.isFinite(weightCapacity) || !Number.isFinite(volumeCapacity) || weightCapacity <= 0 || volumeCapacity <= 0) {
+      Alert.alert('Capacity required', 'Enter valid weight and volume capacities before packing.');
+      return;
+    }
+    if (totalWeight > weightCapacity || totalVolume > volumeCapacity) {
+      Alert.alert('Capacity exceeded', 'Reduce the selected quantities to fit within both vehicle limits.');
+      return;
+    }
     const payloadItems = selectedManifestItems.map((item) => ({
       supply_name: item.supply_name,
       quantity: item.selected_quantity,
@@ -257,22 +273,22 @@ export default function CargoScreen() {
 
     setPacking(true);
     try {
+      const uniqueShipmentCode = `PKG-${Date.now().toString(36).toUpperCase()}-${Math.random().toString(36).slice(2, 7).toUpperCase()}`;
       const response = await fetch(`${BACKEND_URL}/cargo-manifests`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
         body: JSON.stringify({
           expedition_id: selectedExpeditionId,
           title: title.trim() || 'Expedition Cargo Pack',
-          shipment_code: shipmentCode.trim() || `PKG-${Date.now()}`,
-          vehicle_capacity_weight_kg: Number(capacityWeight || 0),
-          vehicle_capacity_volume_m3: Number(capacityVolume || 0),
+          shipment_code: uniqueShipmentCode,
+          vehicle_capacity_weight_kg: weightCapacity,
+          vehicle_capacity_volume_m3: volumeCapacity,
           items: payloadItems,
         }),
       });
       const result = await response.json();
       if (!response.ok) throw new Error(result.detail || 'Unable to save cargo manifest.');
-      setShipmentCode(result.shipment_code || `PKG-${Date.now()}`);
-      await fetchManifests();
+      await fetchManifests(selectedExpeditionId);
       Alert.alert('Manifest packed', 'The final cargo manifest has been saved and linked to the expedition.');
     } catch (error) {
       Alert.alert('Pack failed', error instanceof Error ? error.message : 'Could not save cargo manifest.');
@@ -387,8 +403,8 @@ export default function CargoScreen() {
           ) : (
             requirements.map((item) => {
               const selectedQty = Number(selectedQuantities[item.id] ?? 0);
-              const totalWeightForItem = (Number(item.weight_per_unit ?? 0) * selectedQty).toFixed(1);
-              const totalVolumeForItem = (Number(item.volume_per_unit ?? 0) * selectedQty).toFixed(2);
+              const totalWeightForItem = (Number(item.weight_per_unit) * selectedQty).toFixed(1);
+              const totalVolumeForItem = (Number(item.volume_per_unit) * selectedQty).toFixed(2);
 
               return (
                 <View key={item.id} style={styles.requirementRow}>
@@ -399,10 +415,10 @@ export default function CargoScreen() {
                         <Text style={[styles.priorityText, { color: getPriorityColor(item.priority ?? 'Medium') }]}>{item.priority ?? 'Medium'}</Text>
                       </View>
                     </View>
-                    <Text style={styles.metaText}>Qty: {item.quantity} {item.unit}</Text>
-                    <Text style={styles.metaText}>Weight / Unit: {Number(item.weight_per_unit ?? 0).toFixed(2)} kg</Text>
-                    <Text style={styles.metaText}>Volume / Unit: {Number(item.volume_per_unit ?? 0).toFixed(2)} m³</Text>
-                    <Text style={styles.metaText}>Priority Value: {Number(item.priority_value ?? 0)}</Text>
+                    <Text style={styles.metaText}>Required: {item.quantity} {item.unit} · Available: {item.available_quantity}</Text>
+                    <Text style={styles.metaText}>Weight / Unit: {Number(item.weight_per_unit).toFixed(2)} kg</Text>
+                    <Text style={styles.metaText}>Volume / Unit: {Number(item.volume_per_unit).toFixed(3)} m³</Text>
+                    <Text style={styles.metaText}>Priority Value: {Number(item.priority_value)}</Text>
                   </View>
 
                   <View style={styles.qtyControl}>
@@ -411,6 +427,7 @@ export default function CargoScreen() {
                       style={styles.qtyInput}
                       value={String(selectedQty)}
                       keyboardType="numeric"
+                      editable={isWriteAllowed}
                       onChangeText={(text) => handleQuantityChange(item.id, Number(text || 0))}
                     />
                     <Text style={styles.totalText}>{totalWeightForItem} kg / {totalVolumeForItem} m³</Text>
@@ -426,10 +443,11 @@ export default function CargoScreen() {
           <Text style={styles.label}>Manifest Title</Text>
           <TextInput style={styles.input} value={title} onChangeText={setTitle} />
 
-          <Text style={styles.label}>Shipment Code</Text>
-          <TextInput style={styles.input} value={shipmentCode} onChangeText={setShipmentCode} />
-
-          <TouchableOpacity style={styles.primaryButton} onPress={handlePackManifest} disabled={packing || !isWriteAllowed}>
+          <TouchableOpacity
+            style={styles.primaryButton}
+            onPress={handlePackManifest}
+            disabled={packing || !isWriteAllowed || selectedManifestItems.length === 0 || remainingWeight < 0 || remainingVolume < 0}
+          >
             {packing ? <ActivityIndicator color={colors.white} /> : <Text style={styles.primaryButtonText}>Pack</Text>}
           </TouchableOpacity>
         </View>
@@ -448,7 +466,7 @@ export default function CargoScreen() {
                 <Text style={styles.metaText}>Shipment: {manifest.shipment_code}</Text>
                 <Text style={styles.metaText}>Weight: {manifest.total_weight_kg} kg | Volume: {manifest.total_volume_m3} m³</Text>
                 <Text style={styles.metaText}>Items Selected: {manifest.selected_item_count} | Priority: {manifest.total_priority_value}</Text>
-                {manifest.items.slice(0, 3).map((item, index) => (
+                {manifest.items.map((item, index) => (
                   <Text key={`${manifest.id}-${index}`} style={styles.itemText}>{item.supply_name} × {item.quantity}</Text>
                 ))}
               </View>

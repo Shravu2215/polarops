@@ -179,10 +179,11 @@ class CreateCargoRequest(BaseModel):
 class CargoManifestItemRequest(BaseModel):
     supply_name: str
     quantity: int
-    weight_per_unit: float
-    volume_per_unit: float
-    priority: str
-    priority_value: int
+    selected_quantity: Optional[int] = None
+    weight_per_unit: Optional[float] = None
+    volume_per_unit: Optional[float] = None
+    priority: Optional[str] = None
+    priority_value: Optional[int] = None
 
 class CreateCargoManifestRequest(BaseModel):
     expedition_id: int
@@ -251,6 +252,7 @@ class PlanScheduleRequest(BaseModel):
     expedition_id: Optional[int] = None
     expedition_name: Optional[str] = "Bharati 2026 Season Expedition"
     station_name: Optional[str] = "Bharati"
+    start_date: Optional[str] = None
     departure_deadline: str
     milestones: List[MilestoneInput]
 
@@ -596,6 +598,10 @@ STATION_COORDINATES = {
     "Bharati": {"latitude": -69.4070, "longitude": 76.1910},
 }
 
+@app.get("/stations")
+def get_stations(current_user: models.User = Depends(get_current_user)):
+    return [{"name": name, **coordinates} for name, coordinates in STATION_COORDINATES.items()]
+
 @app.post("/expeditions")
 def create_expedition(
     req: CreateExpeditionRequest,
@@ -838,8 +844,11 @@ def get_expedition_requirements(
         query = query.filter(models.ExpeditionRequirement.expedition_id == expedition_id)
 
     requirements = query.order_by(models.ExpeditionRequirement.id.desc()).all()
-    return [
-        {
+    cargo_rows = {item["id"]: item for item in _requirement_cargo_rows(db, expedition_id)}
+    results = []
+    for requirement in requirements:
+        cargo = cargo_rows[requirement.id]
+        results.append({
             "id": requirement.id,
             "expedition_id": requirement.expedition_id,
             "requested_by_id": requirement.requested_by_id,
@@ -848,10 +857,15 @@ def get_expedition_requirements(
             "quantity": requirement.quantity,
             "unit": requirement.unit,
             "status": requirement.status,
-            "created_at": requirement.created_at.isoformat()
-        }
-        for requirement in requirements
-    ]
+            "created_at": requirement.created_at.isoformat(),
+            "weight_per_unit": cargo["weight_per_unit"],
+            "volume_per_unit": cargo["volume_per_unit"],
+            "priority": cargo["priority"],
+            "priority_value": cargo["priority_value"],
+            "available_quantity": cargo["available_quantity"],
+            "max_selectable_quantity": cargo["quantity"]
+        })
+    return results
 
 # --- Inventory CRUD ---
 @app.post("/inventory")
@@ -1530,18 +1544,32 @@ def save_planner_schedule(
         return cached
 
     milestone_dicts = [m.model_dump() for m in req.milestones]
+    try:
+        start_date = datetime.strptime(req.start_date, "%Y-%m-%d").date() if req.start_date else None
+        end_date = datetime.strptime(req.departure_deadline, "%Y-%m-%d").date()
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Start and end dates must use YYYY-MM-DD format")
+    if start_date and start_date > end_date:
+        raise HTTPException(status_code=400, detail="Start date must be on or before end date")
     schedule_res = calculate_backward_schedule(req.departure_deadline, milestone_dicts)
 
     exp = None
-    if req.expedition_id:
+    if req.expedition_id is not None:
         exp = db.query(models.Expedition).filter(models.Expedition.id == req.expedition_id).first()
-
-    if not exp:
+        if not exp:
+            raise HTTPException(status_code=404, detail="Selected expedition not found")
+    else:
         exp = db.query(models.Expedition).first()
 
     is_duplicate = False
     if exp and exp.id:
-        if exp.departure_deadline == schedule_res["departure_deadline"] and exp.milestones_json == milestone_dicts:
+        if (
+            exp.departure_deadline == schedule_res["departure_deadline"]
+            and exp.milestones_json == milestone_dicts
+            and (not req.expedition_name or exp.name == req.expedition_name)
+            and (not req.station_name or exp.station_name == req.station_name)
+            and (not start_date or exp.start_date == start_date)
+        ):
             is_duplicate = True
 
     if is_duplicate:
@@ -1563,7 +1591,7 @@ def save_planner_schedule(
         exp = models.Expedition(
             name=req.expedition_name or "Bharati 2026 Season Expedition",
             station_name=req.station_name or "Bharati",
-            start_date=deadline_date - timedelta(days=60),
+            start_date=start_date or deadline_date - timedelta(days=60),
             end_date=deadline_date,
             status="Planning",
             target_team_size=25
@@ -1571,9 +1599,18 @@ def save_planner_schedule(
         db.add(exp)
         db.flush()
 
+    exp.name = req.expedition_name or exp.name
+    exp.station_name = req.station_name or exp.station_name
+    station_coordinates = STATION_COORDINATES.get(exp.station_name)
+    if station_coordinates:
+        exp.latitude = station_coordinates["latitude"]
+        exp.longitude = station_coordinates["longitude"]
     exp.departure_deadline = schedule_res["departure_deadline"]
     exp.milestones_json = milestone_dicts
     exp.schedule_output = schedule_res
+    if start_date:
+        exp.start_date = start_date
+    exp.end_date = end_date
     exp.updated_at = datetime.now(timezone.utc)
     db.commit()
     db.refresh(exp)
@@ -2207,34 +2244,21 @@ PRIORITY_WEIGHTS = {
 
 def _supply_metadata_for(name: str) -> dict:
     catalog_item = next((item for item in STANDARD_SUPPLY_CATALOG if item.get("name") == name), None)
-    base = catalog_item or {}
-    lower_name = (name or "").lower()
-
-    if "oxygen" in lower_name:
-        priority = "Critical"; weight = 2.5; volume = 0.04
-    elif "ration" in lower_name or "food" in lower_name or "water" in lower_name:
-        priority = "High"; weight = 1.2; volume = 0.03
-    elif "fuel" in lower_name or "diesel" in lower_name or "propane" in lower_name:
-        priority = "High"; weight = 8.0; volume = 0.08
-    elif "medical" in lower_name or "kit" in lower_name or "surgical" in lower_name:
-        priority = "Critical"; weight = 2.0; volume = 0.03
-    elif "parka" in lower_name or "boot" in lower_name or "goggle" in lower_name:
-        priority = "Medium"; weight = 0.8; volume = 0.02
-    elif "radio" in lower_name or "phone" in lower_name or "gps" in lower_name:
-        priority = "High"; weight = 1.4; volume = 0.02
-    elif "generator" in lower_name or "battery" in lower_name or "solar" in lower_name:
-        priority = "High"; weight = 6.5; volume = 0.09
-    else:
-        priority = "Medium"; weight = 1.0; volume = 0.02
+    if not catalog_item:
+        raise HTTPException(status_code=400, detail=f"Supply '{name}' is missing from the standard catalog")
+    if not all(key in catalog_item for key in ("weight_kg_per_unit", "volume_m3_per_unit", "priority", "priority_value")):
+        raise HTTPException(status_code=500, detail=f"Supply '{name}' is missing cargo metadata in the catalog")
 
     return {
         "supply_name": name,
-        "category": base.get("category", "General"),
-        "unit": base.get("unit", "Units"),
-        "weight_per_unit": float(base.get("weight_kg_per_unit", weight)),
-        "volume_per_unit": float(base.get("volume_m3_per_unit", volume)),
-        "priority": base.get("priority", priority),
-        "priority_value": int(base.get("priority_value", PRIORITY_WEIGHTS.get(priority, 1))),
+        "category": catalog_item["category"],
+        "unit": catalog_item["unit"],
+        "weight_per_unit": float(catalog_item["weight_kg_per_unit"]),
+        "volume_per_unit": float(catalog_item["volume_m3_per_unit"]),
+        "priority": catalog_item["priority"],
+        "priority_value": int(catalog_item["priority_value"]),
+        "inventory_name": catalog_item.get("inventory_name", name),
+        "inventory_units_per_cargo_unit": float(catalog_item.get("inventory_units_per_cargo_unit", 1)),
     }
 
 
@@ -2244,15 +2268,32 @@ def _requirement_cargo_rows(db: Session, expedition_id: Optional[int] = None):
         query = query.filter(models.ExpeditionRequirement.expedition_id == expedition_id)
     rows = query.order_by(models.ExpeditionRequirement.id.asc()).all()
 
+    expedition_cache = {}
     cargo_items = []
     for row in rows:
         meta = _supply_metadata_for(row.supply_name)
-        selected_quantity = max(0, int(row.quantity))
+        expedition = expedition_cache.get(row.expedition_id)
+        if expedition is None:
+            expedition = db.query(models.Expedition).filter(models.Expedition.id == row.expedition_id).first()
+            expedition_cache[row.expedition_id] = expedition
+        stock = None
+        if expedition:
+            stock = db.query(models.InventoryItem).filter(
+                models.InventoryItem.name.ilike(meta["inventory_name"]),
+                models.InventoryItem.location_station == expedition.station_name,
+            ).first()
+        available_quantity = (
+            max(0, int(float(stock.quantity) / meta["inventory_units_per_cargo_unit"]))
+            if stock else 0
+        )
+        selected_quantity = min(max(0, int(row.quantity)), available_quantity)
         cargo_items.append({
             "id": row.id,
             "expedition_id": row.expedition_id,
             "supply_name": row.supply_name,
             "quantity": selected_quantity,
+            "required_quantity": max(0, int(row.quantity)),
+            "available_quantity": available_quantity,
             "unit": row.unit,
             "weight_per_unit": meta["weight_per_unit"],
             "volume_per_unit": meta["volume_per_unit"],
@@ -2276,7 +2317,7 @@ def optimize_cargo_loading(
     db: Session = Depends(get_db)
 ):
     cargo_items = _requirement_cargo_rows(db, req.expedition_id)
-    if not cargo_items:
+    if not cargo_items and req.expedition_id is None:
         cargo_items = db.query(models.CargoShipment).filter(
             models.CargoShipment.status.in_(["Pending", "Packed"])
         ).all()
@@ -2415,14 +2456,58 @@ def create_cargo_manifest(
     if not expedition:
         raise HTTPException(status_code=404, detail="Expedition not found")
 
-    items = [item.model_dump() if hasattr(item, "model_dump") else item.dict() for item in req.items]
-    if not items:
+    if req.vehicle_capacity_weight_kg <= 0 or req.vehicle_capacity_volume_m3 <= 0:
+        raise HTTPException(status_code=400, detail="Vehicle weight and volume capacities must be greater than zero")
+    if db.query(models.CargoManifest).filter(models.CargoManifest.shipment_code == req.shipment_code).first():
+        raise HTTPException(status_code=409, detail="Shipment code already exists; generate a new code")
+    if db.query(models.CargoShipment).filter(models.CargoShipment.shipment_code == req.shipment_code).first():
+        raise HTTPException(status_code=409, detail="Shipment code already exists; generate a new code")
+
+    requested_rows = _requirement_cargo_rows(db, req.expedition_id)
+    available_by_name = {}
+    required_by_name = {}
+    for item in requested_rows:
+        available_by_name[item["supply_name"]] = item["available_quantity"]
+        required_by_name[item["supply_name"]] = required_by_name.get(item["supply_name"], 0) + item["required_quantity"]
+
+    raw_items = [item.model_dump() if hasattr(item, "model_dump") else item.dict() for item in req.items]
+    if not raw_items:
         raise HTTPException(status_code=400, detail="Manifest requires at least one cargo item")
 
-    total_weight = round(sum((item.get("selected_quantity", 0) or item.get("quantity", 0)) * float(item.get("weight_per_unit", 0)) for item in items), 2)
-    total_volume = round(sum((item.get("selected_quantity", 0) or item.get("quantity", 0)) * float(item.get("volume_per_unit", 0)) for item in items), 2)
-    selected_item_count = sum(int(item.get("selected_quantity", 0) or item.get("quantity", 0)) for item in items)
-    total_priority_value = sum(int(item.get("priority_value", 0)) * int(item.get("selected_quantity", 0) or item.get("quantity", 0)) for item in items)
+    selected_by_name = {}
+    items = []
+    for item in raw_items:
+        name = item["supply_name"]
+        quantity = item.get("selected_quantity")
+        if quantity is None:
+            quantity = item["quantity"]
+        quantity = int(quantity)
+        if quantity <= 0:
+            raise HTTPException(status_code=400, detail="Manifest item quantities must be greater than zero")
+        metadata = _supply_metadata_for(name)
+        if name not in required_by_name:
+            raise HTTPException(status_code=400, detail=f"{name} is not required by this expedition")
+        selected_by_name[name] = selected_by_name.get(name, 0) + quantity
+        items.append({
+            "supply_name": name,
+            "quantity": quantity,
+            "weight_per_unit": metadata["weight_per_unit"],
+            "volume_per_unit": metadata["volume_per_unit"],
+            "priority": metadata["priority"],
+            "priority_value": metadata["priority_value"],
+        })
+
+    for name, quantity in selected_by_name.items():
+        max_quantity = min(required_by_name[name], available_by_name[name])
+        if quantity > max_quantity:
+            raise HTTPException(status_code=400, detail=f"Selected quantity for {name} exceeds required or available stock")
+
+    total_weight = round(sum(item["quantity"] * item["weight_per_unit"] for item in items), 2)
+    total_volume = round(sum(item["quantity"] * item["volume_per_unit"] for item in items), 2)
+    selected_item_count = sum(item["quantity"] for item in items)
+    total_priority_value = sum(item["priority_value"] * item["quantity"] for item in items)
+    if total_weight > req.vehicle_capacity_weight_kg or total_volume > req.vehicle_capacity_volume_m3:
+        raise HTTPException(status_code=400, detail="Selected cargo exceeds vehicle weight or volume capacity")
 
     manifest = models.CargoManifest(
         expedition_id=req.expedition_id,
