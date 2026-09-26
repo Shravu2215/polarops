@@ -1539,6 +1539,21 @@ def save_planner_schedule(
     if not exp:
         exp = db.query(models.Expedition).first()
 
+    is_duplicate = False
+    if exp and exp.id:
+        if exp.departure_deadline == schedule_res["departure_deadline"] and exp.milestones_json == milestone_dicts:
+            is_duplicate = True
+
+    if is_duplicate:
+        res_body = {
+            "expedition_id": exp.id,
+            "expedition_name": exp.name,
+            "station_name": exp.station_name,
+            "schedule": schedule_res
+        }
+        save_idempotency(request, 200, res_body, db)
+        return res_body
+
     if not exp:
         try:
             deadline_date = datetime.strptime(schedule_res["departure_deadline"], "%Y-%m-%d").date()

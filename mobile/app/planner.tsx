@@ -111,6 +111,65 @@ export default function PlannerScreen() {
     fetchPlannerAndAudit();
   }, [token]);
 
+  useEffect(() => {
+    if (!departureDeadline || milestones.length === 0) return;
+
+    let deadlineDate: Date;
+    try {
+      const parts = departureDeadline.split('-');
+      if (parts.length === 3) {
+        deadlineDate = new Date(Number(parts[0]), Number(parts[1]) - 1, Number(parts[2]));
+      } else {
+        deadlineDate = new Date(departureDeadline);
+      }
+      if (isNaN(deadlineDate.getTime())) return;
+    } catch {
+      return;
+    }
+
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+
+    const scheduled: ScheduledMilestone[] = [];
+    let currFinish = new Date(deadlineDate);
+
+    for (let i = milestones.length - 1; i >= 0; i--) {
+      const m = milestones[i];
+      const duration = Number(m.duration_days) || 1;
+
+      const startDate = new Date(currFinish);
+      startDate.setDate(startDate.getDate() - duration);
+
+      const isAtRisk = startDate < today;
+
+      scheduled.push({
+        name: m.name,
+        duration_days: duration,
+        latest_start_date: startDate.toISOString().split('T')[0],
+        latest_finish_date: currFinish.toISOString().split('T')[0],
+        is_at_risk: isAtRisk
+      });
+
+      currFinish = new Date(startDate);
+    }
+
+    scheduled.reverse();
+
+    const earliestStart = scheduled.length > 0 ? new Date(scheduled[0].latest_start_date) : today;
+    const diffTime = earliestStart.getTime() - today.getTime();
+    const totalBufferDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+
+    const atRiskCount = scheduled.filter(s => s.is_at_risk).length;
+
+    setSchedule({
+      departure_deadline: departureDeadline,
+      total_buffer_days: totalBufferDays,
+      scheduled_milestones: scheduled,
+      at_risk_count: atRiskCount,
+      has_at_risk: atRiskCount > 0,
+    });
+  }, [departureDeadline, milestones]);
+
   const handleComputeAndSave = async () => {
     if (!departureDeadline.match(/^\d{4}-\d{2}-\d{2}$/)) {
       Alert.alert('Invalid Date', 'Please enter departure deadline in YYYY-MM-DD format');

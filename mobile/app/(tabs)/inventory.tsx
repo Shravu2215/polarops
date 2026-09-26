@@ -78,6 +78,10 @@ export default function InventoryScreen() {
   const [shipments, setShipments] = useState<ShipmentItem[]>([]);
   const [requiredQuantity, setRequiredQuantity] = useState<string>('');
   const [showCatalogModal, setShowCatalogModal] = useState<boolean>(false);
+  const [showAddCatalogModal, setShowAddCatalogModal] = useState<boolean>(false);
+  const [showEditModal, setShowEditModal] = useState<boolean>(false);
+  const [selectedEditItem, setSelectedEditItem] = useState<StationStockItem | null>(null);
+  const [editSubmitting, setEditSubmitting] = useState<boolean>(false);
   const [operationsLoading, setOperationsLoading] = useState<boolean>(true);
   const [requirementsLoading, setRequirementsLoading] = useState<boolean>(false);
   const [requirementSubmitting, setRequirementSubmitting] = useState<boolean>(false);
@@ -227,6 +231,54 @@ export default function InventoryScreen() {
   const onRefresh = () => {
     setRefreshing(true);
     void fetchOperationalData();
+  };
+
+  const handleOpenEdit = (item: StationStockItem) => {
+    setSelectedEditItem(item);
+    setQuantity(item.quantity.toString());
+    setMinReq(item.min_required.toString());
+    setShowEditModal(true);
+  };
+
+  const handleUpdateStock = async () => {
+    if (!selectedEditItem) return;
+    setEditSubmitting(true);
+    const itemPayload = {
+      quantity: parseFloat(quantity) || 0,
+      min_required: parseFloat(minReq) || 0,
+    };
+
+    if (syncStatus === 'Offline') {
+      await addToQueue(`inventory_update_${selectedEditItem.id}`, itemPayload, 2, `/inventory/${selectedEditItem.id}`, 'PUT');
+      Alert.alert('Saved to Queue', 'Update saved on device. It will be synced when connected.');
+      setShowEditModal(false);
+      setEditSubmitting(false);
+      return;
+    }
+
+    try {
+      const res = await fetch(`${BACKEND_URL}/inventory/${selectedEditItem.id}`, {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify(itemPayload),
+      });
+
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({}));
+        throw new Error(errData.detail || `HTTP status ${res.status}`);
+      }
+
+      Alert.alert('Success', 'Stock item updated!');
+      setShowEditModal(false);
+      void fetchOperationalData();
+    } catch (err: any) {
+      Alert.alert('Error', err.message || 'Failed to update inventory item.');
+    } finally {
+      setEditSubmitting(false);
+    }
   };
 
   const handleAddStock = async () => {
@@ -400,15 +452,22 @@ export default function InventoryScreen() {
                           {item.category} | {item.location_station?.trim() || 'Station not recorded'}
                         </Text>
                       </View>
-                      <View style={{
-                        backgroundColor: isLowStock ? '#FEF2F2' : '#DCFCE7',
-                        paddingHorizontal: spacing.xs,
-                        paddingVertical: 3,
-                        borderRadius: radius.pill,
-                      }}>
-                        <Text style={{ fontFamily: typography.fontFamily.bold, fontSize: 10, color: isLowStock ? colors.dangerRed : colors.okGreen }}>
-                          {isLowStock ? 'LOW STOCK' : 'IN STOCK'}
-                        </Text>
+                      <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+                        <View style={{
+                          backgroundColor: isLowStock ? '#FEF2F2' : '#DCFCE7',
+                          paddingHorizontal: spacing.xs,
+                          paddingVertical: 3,
+                          borderRadius: radius.pill,
+                        }}>
+                          <Text style={{ fontFamily: typography.fontFamily.bold, fontSize: 10, color: isLowStock ? colors.dangerRed : colors.okGreen }}>
+                            {isLowStock ? 'LOW STOCK' : 'IN STOCK'}
+                          </Text>
+                        </View>
+                        {isWriteAllowed && (
+                          <TouchableOpacity onPress={() => handleOpenEdit(item)} style={{ padding: 4 }}>
+                            <MaterialIcons name="edit" size={18} color={colors.primary} />
+                          </TouchableOpacity>
+                        )}
                       </View>
                     </View>
                     <View style={{ flexDirection: 'row', justifyContent: 'space-between', flexWrap: 'wrap', gap: spacing.xs }}>
@@ -610,32 +669,15 @@ export default function InventoryScreen() {
 
             {/* 1. Catalog Dropdown / Selector */}
             <Text style={styles.fieldLabel}>Select Supply from Standard Catalog</Text>
-            <ScrollView style={{ maxHeight: 160, borderWidth: 1, borderColor: colors.cardBorder, borderRadius: radius.default, marginBottom: spacing.xs, padding: 4 }}>
-              {STANDARD_SUPPLY_CATALOG.map((catItem, idx) => {
-                const isSelected = selectedCatalogItem.name === catItem.name;
-                return (
-                  <TouchableOpacity
-                    key={idx}
-                    onPress={() => handleSelectCatalogItem(catItem)}
-                    style={{
-                      padding: spacing.xs,
-                      borderRadius: radius.default,
-                      backgroundColor: isSelected ? colors.primaryIce : colors.background,
-                      marginBottom: 4,
-                      borderWidth: 1,
-                      borderColor: isSelected ? colors.primary : colors.cardBorder,
-                    }}
-                  >
-                    <Text style={{ fontFamily: typography.fontFamily.bold, fontSize: 12, color: colors.text }}>
-                      {catItem.name}
-                    </Text>
-                    <Text style={{ fontFamily: typography.fontFamily.regular, fontSize: 10, color: colors.secondaryText }}>
-                      Category: {catItem.category} • Unit: {catItem.unit}
-                    </Text>
-                  </TouchableOpacity>
-                );
-              })}
-            </ScrollView>
+            <TouchableOpacity
+              style={[styles.input, { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: spacing.xs }]}
+              onPress={() => setShowAddCatalogModal(true)}
+            >
+              <Text numberOfLines={1} style={{ flex: 1, fontFamily: typography.fontFamily.medium, fontSize: 12, color: colors.text }}>
+                {selectedCatalogItem.name || 'Select Item'}
+              </Text>
+              <MaterialIcons name="arrow-drop-down" size={20} color={colors.secondaryText} />
+            </TouchableOpacity>
 
             {/* 2. Auto-filled info card */}
             <View style={{
@@ -682,6 +724,82 @@ export default function InventoryScreen() {
 
             <TouchableOpacity style={styles.submitBtn} onPress={handleAddStock} disabled={submitting}>
               {submitting ? <ActivityIndicator color={colors.white} /> : <Text style={styles.submitBtnText}>ADD TO INVENTORY LEDGER</Text>}
+            </TouchableOpacity>
+          </ScrollView>
+        </View>
+      </Modal>
+
+      {/* Add Stock Catalog Select Modal */}
+      <Modal visible={showAddCatalogModal} transparent animationType="slide" onRequestClose={() => setShowAddCatalogModal(false)}>
+        <View style={styles.modalOverlay}>
+          <View style={[styles.modalCard, { maxHeight: '82%' }]}>
+            <View style={styles.modalHeader}>
+              <Text style={styles.modalTitle}>Standard Catalog</Text>
+              <TouchableOpacity onPress={() => setShowAddCatalogModal(false)} accessibilityLabel="Close supply catalog">
+                <MaterialIcons name="close" size={24} color={colors.text} />
+              </TouchableOpacity>
+            </View>
+            <ScrollView>
+              {STANDARD_SUPPLY_CATALOG.map((item, idx) => (
+                <TouchableOpacity
+                  key={`add-cat-${idx}`}
+                  onPress={() => {
+                    handleSelectCatalogItem(item);
+                    setShowAddCatalogModal(false);
+                  }}
+                  style={{
+                    padding: spacing.sm,
+                    marginBottom: spacing.xs,
+                    backgroundColor: selectedCatalogItem.name === item.name ? colors.primaryIce : colors.background,
+                    borderWidth: 1,
+                    borderColor: selectedCatalogItem.name === item.name ? colors.primary : colors.cardBorder,
+                    borderRadius: radius.default,
+                  }}
+                >
+                  <Text style={{ fontFamily: typography.fontFamily.bold, fontSize: 12, color: colors.text }}>
+                    {item.name}
+                  </Text>
+                  <Text style={styles.itemCategory}>{item.category} | {item.unit}</Text>
+                </TouchableOpacity>
+              ))}
+            </ScrollView>
+          </View>
+        </View>
+      </Modal>
+
+      {/* Edit Stock Item Modal */}
+      <Modal visible={showEditModal} animationType="slide" transparent>
+        <View style={styles.modalOverlay}>
+          <ScrollView contentContainerStyle={[styles.modalCard, { maxHeight: '85%' }]}>
+            <View style={styles.modalHeader}>
+              <Text style={styles.modalTitle}>Edit Station Stock</Text>
+              <TouchableOpacity onPress={() => setShowEditModal(false)}>
+                <MaterialIcons name="close" size={24} color={colors.text} />
+              </TouchableOpacity>
+            </View>
+
+            {selectedEditItem && (
+              <View style={{ marginBottom: spacing.md }}>
+                <Text style={{ fontFamily: typography.fontFamily.bold, fontSize: 14, color: colors.text }}>
+                  {selectedEditItem.name}
+                </Text>
+                <Text style={styles.itemCategory}>{selectedEditItem.category} | {selectedEditItem.unit}</Text>
+              </View>
+            )}
+
+            <View style={{ flexDirection: 'row', gap: 8 }}>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.fieldLabel}>Quantity</Text>
+                <TextInput style={styles.input} value={quantity} onChangeText={setQuantity} keyboardType="numeric" placeholder="e.g. 500" />
+              </View>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.fieldLabel}>Min / Alert Level</Text>
+                <TextInput style={styles.input} value={minReq} onChangeText={setMinReq} keyboardType="numeric" placeholder="e.g. 100" />
+              </View>
+            </View>
+
+            <TouchableOpacity style={styles.submitBtn} onPress={handleUpdateStock} disabled={editSubmitting}>
+              {editSubmitting ? <ActivityIndicator color={colors.white} /> : <Text style={styles.submitBtnText}>UPDATE ITEM</Text>}
             </TouchableOpacity>
           </ScrollView>
         </View>
