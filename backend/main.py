@@ -214,6 +214,16 @@ async def lifespan(app: FastAPI):
                     notes="Opening balance migrated from existing station stock",
                 ))
         db.commit()
+
+        # Check if users exist, if not seed database
+        user_count = db.query(models.User).count()
+        if user_count == 0:
+            print("[INFO] Database is empty. Seeding demo data...")
+            try:
+                import seed
+                seed.seed_database(reset=False)
+            except Exception as e:
+                print(f"[ERROR] Auto-seeding failed: {e}")
     finally:
         db.close()
         db_scope.close()
