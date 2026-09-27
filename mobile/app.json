@@ -4,7 +4,6 @@
     "slug": "mobile",
     "scheme": "polarops",
     "version": "1.0.0",
-
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "light",
@@ -12,6 +11,7 @@
       "supportsTablet": true
     },
     "android": {
+      "package": "com.polarops.app",
       "adaptiveIcon": {
         "backgroundColor": "#E6F4FE",
         "foregroundImage": "./assets/android-icon-foreground.png",
@@ -27,6 +27,13 @@
       "expo-router",
       "expo-status-bar",
       "expo-font"
-    ]
+    ],
+    "extra": {
+      "router": {},
+      "eas": {
+        "projectId": "d1697b02-49bf-4a41-bce6-b6e5f12fc237"
+      }
+    },
+    "owner": "shravu2215"
   }
 }
